@@ -28,12 +28,13 @@ type Config struct {
 	// bodies. It is itself configuration, not a hardcoded `if isProd`
 	// switch, so a new environment (a "canary" tier, a "loadtest" tier)
 	// never requires a code change.
-	Environment string          `mapstructure:"environment"`
-	Server      ServerConfig    `mapstructure:"server"`
-	Database    DatabaseConfig  `mapstructure:"database"`
-	JWT         JWTConfig       `mapstructure:"jwt"`
-	RateLimit   RateLimitConfig `mapstructure:"rate_limit"`
-	Log         LogConfig       `mapstructure:"log"`
+	Environment string            `mapstructure:"environment"`
+	Server      ServerConfig      `mapstructure:"server"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	JWT         JWTConfig         `mapstructure:"jwt"`
+	AccessToken AccessTokenConfig `mapstructure:"access_token"`
+	RateLimit   RateLimitConfig   `mapstructure:"rate_limit"`
+	Log         LogConfig         `mapstructure:"log"`
 }
 
 type ServerConfig struct {
@@ -88,6 +89,38 @@ type JWTConfig struct {
 	RefreshTokenTTL time.Duration `mapstructure:"refresh_token_ttl"`
 }
 
+// AccessTokenConfig configures security.TokenService (Milestone 5A) — the
+// new Ed25519/EdDSA-signed access token issuer, kept deliberately separate
+// from JWTConfig above (the existing HS256 implementation util.JWTSigner
+// uses for sessions/refresh tokens today; see that package's own doc
+// comment for why it's untouched by this milestone) rather than folded
+// into it, so the two signing systems' settings can never be confused
+// with each other.
+type AccessTokenConfig struct {
+	// Issuer is this service's `iss` claim value on every access token it
+	// issues.
+	Issuer string `mapstructure:"issuer"`
+	// TTL bounds every access token's lifetime — see Validate, which caps
+	// it outright. There is deliberately no way to override this per
+	// request anywhere in this codebase.
+	TTL time.Duration `mapstructure:"ttl"`
+	// KeyID is the current signing key's `kid` — what a verifier's key
+	// lookup keys on, and what rotating to a new key pair means changing.
+	// No default (see Validate): an operator must set this explicitly.
+	KeyID string `mapstructure:"key_id"`
+	// PrivateKeyPEM/PrivateKeyPath both hold PEM-encoded PKCS#8 Ed25519
+	// private key material — the actual secret, never a literal in source
+	// or in configs/config.yaml. PrivateKeyPath, if set, wins over
+	// PrivateKeyPEM: a mounted secret file is the more realistic
+	// production mechanism than raw key bytes sitting in process
+	// environment — the same "two ways to supply one value, one wins"
+	// precedent DatabaseConfig.URL already sets in this file. Neither has
+	// a default, the same deliberate omission jwt.signing_key and
+	// database.password already make.
+	PrivateKeyPEM  string `mapstructure:"private_key_pem"`
+	PrivateKeyPath string `mapstructure:"private_key_path"`
+}
+
 type RateLimitConfig struct {
 	LoginPerMinute int `mapstructure:"login_per_minute"`
 }
@@ -139,6 +172,19 @@ func Load() (*Config, error) {
 	if err := v.BindEnv("database.password"); err != nil {
 		return nil, fmt.Errorf("config: bind database.password: %w", err)
 	}
+	// access_token.key_id/private_key_pem/private_key_path have no
+	// default either (see AccessTokenConfig's doc comment), so they need
+	// the same explicit BindEnv treatment as the two secrets above —
+	// exactly the gotcha this comment block already warns about.
+	if err := v.BindEnv("access_token.key_id"); err != nil {
+		return nil, fmt.Errorf("config: bind access_token.key_id: %w", err)
+	}
+	if err := v.BindEnv("access_token.private_key_pem"); err != nil {
+		return nil, fmt.Errorf("config: bind access_token.private_key_pem: %w", err)
+	}
+	if err := v.BindEnv("access_token.private_key_path"); err != nil {
+		return nil, fmt.Errorf("config: bind access_token.private_key_path: %w", err)
+	}
 
 	var cfg Config
 	decodeHook := mapstructure.ComposeDecodeHookFunc(
@@ -185,6 +231,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("jwt.access_token_ttl", 15*time.Minute)
 	v.SetDefault("jwt.refresh_token_ttl", 30*24*time.Hour)
 
+	v.SetDefault("access_token.issuer", "auth-service")
+	// Milestone 5A: "a secure default appropriate for our architecture,
+	// initially around 10 minutes" — access tokens must be short-lived;
+	// see Validate's hard cap for the enforcement half of that statement.
+	v.SetDefault("access_token.ttl", 10*time.Minute)
+
 	v.SetDefault("rate_limit.login_per_minute", 5)
 
 	v.SetDefault("log.level", "info")
@@ -223,6 +275,24 @@ func (c Config) Validate() error {
 	if c.JWT.RefreshTokenTTL <= c.JWT.AccessTokenTTL {
 		errs = append(errs, "jwt.refresh_token_ttl must be longer than jwt.access_token_ttl")
 	}
+
+	if c.AccessToken.Issuer == "" {
+		errs = append(errs, "access_token.issuer must not be empty")
+	}
+	if c.AccessToken.TTL <= 0 {
+		errs = append(errs, "access_token.ttl must be positive")
+	} else if c.AccessToken.TTL > time.Hour {
+		// Not just floored, capped: Milestone 5A requires access tokens
+		// to be short-lived, not merely "positive" — 1h is a generous
+		// outer bound for what "short-lived" can mean here.
+		errs = append(errs, "access_token.ttl must not exceed 1h — access tokens must be short-lived")
+	}
+	// access_token.key_id/private_key_pem/private_key_path are
+	// deliberately not checked here — see AccessTokenConfig's doc
+	// comment: nothing in this milestone's cmd/server/main.go constructs
+	// a security.TokenService from them yet, and
+	// security.LoadSigningKeySet already fails closed on missing or
+	// malformed key material at the point a future caller actually does.
 
 	if c.RateLimit.LoginPerMinute <= 0 {
 		errs = append(errs, "rate_limit.login_per_minute must be positive")

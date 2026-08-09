@@ -35,6 +35,14 @@ func (c Config) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("jwt.signing_key", redact(c.JWT.SigningKey))
 	enc.AddDuration("jwt.access_token_ttl", c.JWT.AccessTokenTTL)
 	enc.AddDuration("jwt.refresh_token_ttl", c.JWT.RefreshTokenTTL)
+	enc.AddString("access_token.issuer", c.AccessToken.Issuer)
+	enc.AddDuration("access_token.ttl", c.AccessToken.TTL)
+	enc.AddString("access_token.key_id", c.AccessToken.KeyID)
+	enc.AddString("access_token.private_key_pem", redact(c.AccessToken.PrivateKeyPEM))
+	// A file path is not itself a secret — it's operationally useful to
+	// see which path a deployment is reading from, the same way
+	// database.host is logged in full.
+	enc.AddString("access_token.private_key_path", c.AccessToken.PrivateKeyPath)
 	enc.AddInt("rate_limit.login_per_minute", c.RateLimit.LoginPerMinute)
 	enc.AddString("log.level", c.Log.Level)
 	return nil

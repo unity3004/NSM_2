@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/go-viper/mapstructure/v2 v2.5.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.12.3
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.28.0
