@@ -19,13 +19,24 @@ import (
 // Postgres error code.
 const pgUniqueViolation = "23505"
 
+// pgForeignKeyViolation is Postgres's SQLSTATE for a foreign-key failure
+// — e.g. sessions.user_id referencing a users row that doesn't exist.
+// Without this case, that constraint doing exactly its job would surface
+// as a raw *pq.Error all the way up through the service layer.
+const pgForeignKeyViolation = "23503"
+
 func translateError(err error) error {
 	if err == nil {
 		return nil
 	}
 	var pqErr *pq.Error
-	if errors.As(err, &pqErr) && pqErr.Code == pgUniqueViolation {
-		return entity.ErrAlreadyExists
+	if errors.As(err, &pqErr) {
+		switch pqErr.Code {
+		case pgUniqueViolation:
+			return entity.ErrAlreadyExists
+		case pgForeignKeyViolation:
+			return entity.ErrNotFound
+		}
 	}
 	return err
 }

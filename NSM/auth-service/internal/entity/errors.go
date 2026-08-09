@@ -18,4 +18,6 @@ var (
 	ErrTokenExpired       = errors.New("token has expired")
 	ErrTokenReuseDetected = errors.New("refresh token was already rotated")
 	ErrOwnerConflict      = errors.New("exactly one owner must be set")
+	ErrSessionRevoked     = errors.New("session has been revoked")
+	ErrSessionExpired     = errors.New("session has expired")
 )

@@ -222,15 +222,44 @@ func (f *FakeUserRepository) ListRoles(_ context.Context, userID string) ([]*ent
 type FakeSessionRepository struct {
 	mu   sync.Mutex
 	byID map[string]*entity.Session
+	// FailNextCreate/FailNextGetByID/FailNextRevoke, if non-nil, are
+	// returned by the next matching call instead of the normal behavior,
+	// then reset to nil — the same fault-injection convention as
+	// FakeAuditLogRepository.FailNext and FakeUserRepository.FailNextGetByEmail,
+	// used by internal/service/session_service_test.go to exercise
+	// "nonexistent user" (a simulated foreign-key violation) and "database
+	// unavailable" without a real Postgres to actually break.
+	FailNextCreate  error
+	FailNextGetByID error
+	FailNextRevoke  error
 }
 
 func NewFakeSessionRepository() *FakeSessionRepository {
 	return &FakeSessionRepository{byID: map[string]*entity.Session{}}
 }
 
+// Seed inserts or overwrites a session directly, bypassing Create — the
+// natural way a test arranges "given a session already in this state"
+// (e.g. one that's already past its expiry), mirroring
+// FakeUserRepository.Seed for the same reason.
+func (f *FakeSessionRepository) Seed(s *entity.Session) *entity.Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s.ID == "" {
+		s.ID = util.NewUUID()
+	}
+	f.byID[s.ID] = s
+	return s
+}
+
 func (f *FakeSessionRepository) Create(_ context.Context, s *entity.Session) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextCreate != nil {
+		err := f.FailNextCreate
+		f.FailNextCreate = nil
+		return err
+	}
 	s.ID = util.NewUUID()
 	s.CreatedAt, s.LastActiveAt = time.Now(), time.Now()
 	f.byID[s.ID] = s
@@ -240,11 +269,17 @@ func (f *FakeSessionRepository) Create(_ context.Context, s *entity.Session) err
 func (f *FakeSessionRepository) GetByID(_ context.Context, id string) (*entity.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextGetByID != nil {
+		err := f.FailNextGetByID
+		f.FailNextGetByID = nil
+		return nil, err
+	}
 	s, ok := f.byID[id]
 	if !ok {
 		return nil, entity.ErrNotFound
 	}
-	return s, nil
+	cp := *s
+	return &cp, nil
 }
 
 func (f *FakeSessionRepository) GetByTokenHash(_ context.Context, hash string) (*entity.Session, error) {
@@ -279,11 +314,23 @@ func (f *FakeSessionRepository) Touch(_ context.Context, id string, t time.Time)
 	return nil
 }
 
+// Revoke mirrors postgres.sessionRepository.Revoke's
+// `WHERE id = $1 AND revoked_at IS NULL` exactly: a session that's already
+// revoked matches zero rows in Postgres, translated to entity.ErrNotFound
+// by checkRowsAffected, so the fake must fail the same way on a second
+// call rather than silently re-revoking — that's what makes
+// SessionService.RevokeSession's own idempotency handling meaningfully
+// testable against this fake instead of trivially true.
 func (f *FakeSessionRepository) Revoke(_ context.Context, id string, reason entity.RevocationReason) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextRevoke != nil {
+		err := f.FailNextRevoke
+		f.FailNextRevoke = nil
+		return err
+	}
 	s, ok := f.byID[id]
-	if !ok {
+	if !ok || s.RevokedAt != nil {
 		return entity.ErrNotFound
 	}
 	now := time.Now()
