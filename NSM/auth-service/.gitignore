@@ -1,0 +1,15 @@
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+
+.env
+.env.*
+!.env.example
+configs/*.local.yaml
+
+.idea/
+.vscode/
+*.swp

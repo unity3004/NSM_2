@@ -1,0 +1,58 @@
+# Local development stack only — not what runs in production (there, the
+# database is a managed instance and the app is one of several replicas
+# behind a load balancer, neither of which docker-compose models well).
+# `docker compose up` from this directory gets a new contributor from zero
+# to a running service against a real Postgres in one command.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: authdb
+      POSTGRES_USER: authsvc
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authsvc -d authdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ../migrations:/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable",
+        "up",
+      ]
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      # Everything else (timeouts, pool sizes, log format) comes from
+      # ../configs/config.yaml's defaults — only the two secrets, plus
+      # this environment's database host, need overriding here. See
+      # ../internal/config/config.go and ../README.md's config section.
+      AUTH_ENVIRONMENT: "development"
+      AUTH_DATABASE_URL: "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable"
+      AUTH_JWT_SIGNING_KEY: "local-development-signing-key-not-for-prod-use"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
