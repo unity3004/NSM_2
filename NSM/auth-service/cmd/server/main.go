@@ -108,6 +108,18 @@ func main() {
 	// AuthServiceDeps.Passwords' doc comment.
 	passwordSvc := security.NewPasswordService(security.DefaultParams)
 
+	// signingKeys/accessTokens back security.TokenService (Milestone 5A),
+	// now actually constructed for the first time — see
+	// AccessTokenConfig's doc comment on why Config.Validate only started
+	// hard-requiring these fields once something depended on them for
+	// real.
+	signingKeys, err := security.LoadSigningKeySet(cfg.AccessToken.KeyID, cfg.AccessToken.PrivateKeyPEM, cfg.AccessToken.PrivateKeyPath)
+	if err != nil {
+		logger.Error("failed to load access token signing key", zap.Error(err))
+		os.Exit(1)
+	}
+	accessTokens := security.NewTokenService(signingKeys, cfg.AccessToken.Issuer, cfg.AccessToken.TTL)
+
 	// --- services (use cases, depend only on repository interfaces) ---
 	authSvc := service.NewAuthService(service.AuthServiceDeps{
 		Users:         userRepo,
@@ -120,14 +132,25 @@ func main() {
 		AuditTx:       loginAuditTx,
 	})
 	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
+	sessionSvc := service.NewSessionService(sessionRepo)
+	refreshTokenSvc := service.NewRefreshTokenService(service.RefreshTokenServiceDeps{
+		RefreshTokens:       refreshTokenRepo,
+		Sessions:            sessionSvc,
+		Tokens:              accessTokens,
+		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
+		AccessTokenTTL:      cfg.AccessToken.TTL,
+		RefreshTTL:          cfg.RefreshToken.TTL,
+		AuditTx:             loginAuditTx,
+	})
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
-		AuthService:    authSvc,
-		UserService:    userSvc,
-		TokenAuth:      tokenSigner,
-		AllowedOrigins: cfg.Server.AllowedOrigins,
-		Logger:         logger,
+		AuthService:         authSvc,
+		UserService:         userSvc,
+		RefreshTokenService: refreshTokenSvc,
+		TokenAuth:           tokenSigner,
+		AllowedOrigins:      cfg.Server.AllowedOrigins,
+		Logger:              logger,
 	})
 
 	srv := &http.Server{

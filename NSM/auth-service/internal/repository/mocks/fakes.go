@@ -354,6 +354,13 @@ func (f *FakeSessionRepository) RevokeAllForUser(_ context.Context, userID strin
 type FakeRefreshTokenRepository struct {
 	mu   sync.Mutex
 	byID map[string]*entity.RefreshToken
+	// FailNextGetByTokenHash/FailNextRotate, if non-nil, are returned by
+	// the next matching call instead of the normal behavior, then reset to
+	// nil — the same fault-injection convention used throughout this file,
+	// for Milestone 5B's "database failure produces a safe error" and
+	// reuse-detection tests.
+	FailNextGetByTokenHash error
+	FailNextRotate         error
 }
 
 func NewFakeRefreshTokenRepository() *FakeRefreshTokenRepository {
@@ -372,6 +379,11 @@ func (f *FakeRefreshTokenRepository) Create(_ context.Context, t *entity.Refresh
 func (f *FakeRefreshTokenRepository) GetByTokenHash(_ context.Context, hash string) (*entity.RefreshToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextGetByTokenHash != nil {
+		err := f.FailNextGetByTokenHash
+		f.FailNextGetByTokenHash = nil
+		return nil, err
+	}
 	for _, t := range f.byID {
 		if t.TokenHash == hash {
 			cp := *t
@@ -381,11 +393,23 @@ func (f *FakeRefreshTokenRepository) GetByTokenHash(_ context.Context, hash stri
 	return nil, entity.ErrNotFound
 }
 
+// Rotate mirrors postgres.refreshTokenRepository.Rotate's
+// `WHERE id = $3 AND revoked_at IS NULL` exactly: a token that's already
+// revoked (rotated or otherwise) matches zero rows in Postgres, and the
+// whole transaction — including the "next" row's INSERT — rolls back with
+// it. The fake must fail the same way and must not persist `next` in that
+// case, or the concurrency/reuse tests this exists for would pass
+// trivially instead of proving anything.
 func (f *FakeRefreshTokenRepository) Rotate(_ context.Context, current, next *entity.RefreshToken) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextRotate != nil {
+		err := f.FailNextRotate
+		f.FailNextRotate = nil
+		return err
+	}
 	stored, ok := f.byID[current.ID]
-	if !ok {
+	if !ok || stored.RevokedAt != nil {
 		return entity.ErrNotFound
 	}
 	next.ID = util.NewUUID()

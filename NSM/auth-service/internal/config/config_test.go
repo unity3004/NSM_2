@@ -1,11 +1,45 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"strings"
 	"testing"
 )
 
 const validKey = "this-is-a-fake-signing-key-that-is-32+-bytes-long"
+
+// generateTestEd25519PrivateKeyPEM returns a freshly generated (never
+// persisted anywhere, never reused across test runs) PKCS#8 PEM-encoded
+// Ed25519 private key — a test fixture, not a "private development key"
+// committed to the repository, the same distinction internal/security's
+// own tests already draw for the same reason.
+func generateTestEd25519PrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+}
+
+// setValidAccessTokenEnv sets the env vars Validate now hard-requires for
+// access_token.key_id/private_key_pem (Milestone 5B: cmd/server/main.go
+// now actually constructs a security.TokenService from them) — every
+// Load() test that expects success, or expects a *different* field to be
+// the one that fails, needs these set so this requirement doesn't mask
+// what the test is actually checking.
+func setValidAccessTokenEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("AUTH_ACCESS_TOKEN_KEY_ID", "test-key-1")
+	t.Setenv("AUTH_ACCESS_TOKEN_PRIVATE_KEY_PEM", generateTestEd25519PrivateKeyPEM(t))
+}
 
 func TestLoad_FailsClosedWhenSigningKeyMissing(t *testing.T) {
 	// No AUTH_* env vars set: environment defaults to "development", so
@@ -23,6 +57,7 @@ func TestLoad_FailsClosedWhenSigningKeyMissing(t *testing.T) {
 func TestLoad_EnvironmentVariablesOverrideDefaults(t *testing.T) {
 	t.Setenv("AUTH_JWT_SIGNING_KEY", validKey)
 	t.Setenv("AUTH_DATABASE_PASSWORD", "s3cret")
+	setValidAccessTokenEnv(t)
 	t.Setenv("AUTH_SERVER_HTTP_ADDR", ":9090")
 	t.Setenv("AUTH_SERVER_ALLOWED_ORIGINS", "https://a.example.com,https://b.example.com")
 
@@ -47,6 +82,7 @@ func TestLoad_EnvironmentVariablesOverrideDefaults(t *testing.T) {
 func TestLoad_ProductionRequiresDatabasePassword(t *testing.T) {
 	t.Setenv("AUTH_JWT_SIGNING_KEY", validKey)
 	t.Setenv("AUTH_ENVIRONMENT", "production")
+	setValidAccessTokenEnv(t)
 	// Deliberately not setting AUTH_DATABASE_PASSWORD.
 
 	_, err := Load()

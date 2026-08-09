@@ -174,6 +174,15 @@ func (s *SessionService) RevokeSession(ctx context.Context, callerUserID, sessio
 	return nil
 }
 
+// Touch updates a session's last_active_at to now — a thin wrapper around
+// repository.SessionRepository.Touch, kept as its own best-effort call
+// rather than folded into RefreshTokenService.Refresh's main rotation
+// step: see that method's doc comment for why this write doesn't need to
+// share a transaction with anything.
+func (s *SessionService) Touch(ctx context.Context, sessionID string) error {
+	return s.sessions.Touch(ctx, sessionID, time.Now())
+}
+
 // ExpireSession marks a session revoked with entity.RevocationExpired,
 // idempotently: an already-revoked or nonexistent session is treated as
 // success, since "not currently an active, un-expired session" is exactly

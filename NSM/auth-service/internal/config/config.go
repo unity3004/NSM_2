@@ -28,13 +28,14 @@ type Config struct {
 	// bodies. It is itself configuration, not a hardcoded `if isProd`
 	// switch, so a new environment (a "canary" tier, a "loadtest" tier)
 	// never requires a code change.
-	Environment string            `mapstructure:"environment"`
-	Server      ServerConfig      `mapstructure:"server"`
-	Database    DatabaseConfig    `mapstructure:"database"`
-	JWT         JWTConfig         `mapstructure:"jwt"`
-	AccessToken AccessTokenConfig `mapstructure:"access_token"`
-	RateLimit   RateLimitConfig   `mapstructure:"rate_limit"`
-	Log         LogConfig         `mapstructure:"log"`
+	Environment  string             `mapstructure:"environment"`
+	Server       ServerConfig       `mapstructure:"server"`
+	Database     DatabaseConfig     `mapstructure:"database"`
+	JWT          JWTConfig          `mapstructure:"jwt"`
+	AccessToken  AccessTokenConfig  `mapstructure:"access_token"`
+	RefreshToken RefreshTokenConfig `mapstructure:"refresh_token"`
+	RateLimit    RateLimitConfig    `mapstructure:"rate_limit"`
+	Log          LogConfig          `mapstructure:"log"`
 }
 
 type ServerConfig struct {
@@ -119,6 +120,22 @@ type AccessTokenConfig struct {
 	// database.password already make.
 	PrivateKeyPEM  string `mapstructure:"private_key_pem"`
 	PrivateKeyPath string `mapstructure:"private_key_path"`
+	// DefaultAudience is the `aud` claim self-issued access tokens carry —
+	// login and refresh both mint a token for this service's own API,
+	// never a client-chosen value (see Milestone 5B's report: the refresh
+	// request body is exactly {"refresh_token": "..."}, with no audience
+	// field for a client to set).
+	DefaultAudience string `mapstructure:"default_audience"`
+}
+
+// RefreshTokenConfig configures service.RefreshTokenService (Milestone
+// 5B) — deliberately its own section rather than reusing
+// JWTConfig.RefreshTokenTTL, which stays the old util.JWTSigner-based
+// AuthService.RefreshToken flow's own knob (see that method's doc comment
+// on why it's untouched). There is deliberately no per-request override
+// anywhere in this codebase for this value.
+type RefreshTokenConfig struct {
+	TTL time.Duration `mapstructure:"ttl"`
 }
 
 type RateLimitConfig struct {
@@ -236,6 +253,13 @@ func setDefaults(v *viper.Viper) {
 	// initially around 10 minutes" — access tokens must be short-lived;
 	// see Validate's hard cap for the enforcement half of that statement.
 	v.SetDefault("access_token.ttl", 10*time.Minute)
+	v.SetDefault("access_token.default_audience", "auth-service")
+
+	// Milestone 5B: "a secure initial default around 7 days" — deliberately
+	// its own setting rather than reusing jwt.refresh_token_ttl (above),
+	// which stays the old util.JWTSigner-based flow's own knob; the same
+	// separation AccessTokenConfig already keeps from JWTConfig.
+	v.SetDefault("refresh_token.ttl", 7*24*time.Hour)
 
 	v.SetDefault("rate_limit.login_per_minute", 5)
 
@@ -287,12 +311,24 @@ func (c Config) Validate() error {
 		// outer bound for what "short-lived" can mean here.
 		errs = append(errs, "access_token.ttl must not exceed 1h — access tokens must be short-lived")
 	}
-	// access_token.key_id/private_key_pem/private_key_path are
-	// deliberately not checked here — see AccessTokenConfig's doc
-	// comment: nothing in this milestone's cmd/server/main.go constructs
-	// a security.TokenService from them yet, and
-	// security.LoadSigningKeySet already fails closed on missing or
-	// malformed key material at the point a future caller actually does.
+	if c.AccessToken.KeyID == "" {
+		errs = append(errs, "access_token.key_id is required")
+	}
+	if c.AccessToken.PrivateKeyPEM == "" && c.AccessToken.PrivateKeyPath == "" {
+		errs = append(errs, "access_token.private_key_pem or access_token.private_key_path is required")
+	}
+	if c.AccessToken.DefaultAudience == "" {
+		errs = append(errs, "access_token.default_audience must not be empty")
+	}
+	// Milestone 5A left the two checks above out: nothing constructed a
+	// real security.TokenService yet, so requiring them only broke tests
+	// for no live safety benefit. Milestone 5B's cmd/server/main.go now
+	// does construct one — see RefreshTokenService's wiring — so the
+	// fail-closed guarantee belongs here now, same as jwt.signing_key.
+
+	if c.RefreshToken.TTL <= 0 {
+		errs = append(errs, "refresh_token.ttl must be positive")
+	}
 
 	if c.RateLimit.LoginPerMinute <= 0 {
 		errs = append(errs, "rate_limit.login_per_minute must be positive")

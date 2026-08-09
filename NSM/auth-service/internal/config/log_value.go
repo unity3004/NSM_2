@@ -43,6 +43,8 @@ func (c Config) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	// see which path a deployment is reading from, the same way
 	// database.host is logged in full.
 	enc.AddString("access_token.private_key_path", c.AccessToken.PrivateKeyPath)
+	enc.AddString("access_token.default_audience", c.AccessToken.DefaultAudience)
+	enc.AddDuration("refresh_token.ttl", c.RefreshToken.TTL)
 	enc.AddInt("rate_limit.login_per_minute", c.RateLimit.LoginPerMinute)
 	enc.AddString("log.level", c.Log.Level)
 	return nil
