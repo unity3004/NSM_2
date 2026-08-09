@@ -1,11 +1,21 @@
 package dto
 
-import "regexp"
+import (
+	"regexp"
+	"time"
+)
 
 // emailPattern is a deliberately loose "looks like an email" check — RFC
 // 5322 in full is not worth implementing by hand, and the only address that
 // actually matters gets validated for real by sending it mail.
 var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+// usernamePattern: letters, digits, and .-_ only, 3-100 characters. No
+// spaces or other punctuation — a username is a stable, typeable
+// identifier (shown in logs, audit trails, @-mentions elsewhere in a
+// platform), not a display name; a separate display-name field is where
+// arbitrary characters would belong if one is ever added.
+var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]{3,100}$`)
 
 // LoginRequest matches components.schemas.LoginRequest.
 type LoginRequest struct {
@@ -73,4 +83,58 @@ type SessionResponse struct {
 	CreatedAt         string  `json:"created_at"`
 	LastActiveAt      string  `json:"last_active_at"`
 	ExpiresAt         string  `json:"expires_at"`
+}
+
+// RegisterRequest is POST /auth/register's body — self-service signup,
+// distinct from dto.UserCreateRequest (the admin/invite path on
+// POST /users, where username is optional and a password may be omitted
+// for an SSO-only account). Registration always supplies all three
+// fields; there is no invite or SSO variant of this endpoint.
+type RegisterRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// Validate checks each field's *shape* — required, well-formed, within
+// length bounds. It does not normalize (see util.NormalizeEmail) and does
+// not check uniqueness: uniqueness is Postgres's job (see
+// auth-service-database-schema.md's discussion of relying on UNIQUE
+// constraints as the final protection), not a property a regex can ever
+// verify anyway.
+func (r RegisterRequest) Validate() error {
+	var errs ValidationErrors
+
+	if r.Username == "" {
+		errs.Add("username", "is required")
+	} else if !usernamePattern.MatchString(r.Username) {
+		errs.Add("username", "must be 3-100 characters and contain only letters, digits, '.', '_', or '-'")
+	}
+
+	if r.Email == "" {
+		errs.Add("email", "is required")
+	} else if len(r.Email) > 255 || !emailPattern.MatchString(r.Email) {
+		errs.Add("email", "must be a valid email address")
+	}
+
+	if r.Password == "" {
+		errs.Add("password", "is required")
+	} else if !isPasswordComplexEnough(r.Password) {
+		errs.Add("password", "must be at least 12 characters and include upper, lower, digit, and symbol")
+	}
+
+	return errs.Err()
+}
+
+// RegisterResponse is the 201 body for a successful registration. There is
+// no password, password_hash, or password_algo field on this type — not
+// omitted via a JSON tag on a field that exists, but simply never declared,
+// so there is no code path through which a hash could reach this struct's
+// JSON encoding at all.
+type RegisterResponse struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
 }

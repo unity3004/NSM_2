@@ -40,13 +40,54 @@ func (f *FakeUserRepository) Seed(u *entity.User) *entity.User {
 	return u
 }
 
+// Create mirrors the two real UNIQUE constraints on the users table
+// (uq_users_org_email, uq_users_org_username — see
+// migrations/000003_create_users_table.up.sql and
+// 000019_add_users_username_unique.up.sql) so a unit test exercising
+// duplicate-registration behavior gets the same entity.ErrAlreadyExists a
+// real Postgres unique-violation would produce via translateError,
+// without needing a database. A nil/empty username never conflicts with
+// another nil/empty username, matching Postgres's own NULL-is-distinct
+// behavior in a UNIQUE index.
 func (f *FakeUserRepository) Create(_ context.Context, u *entity.User) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, existing := range f.byID {
+		if existing.OrganizationID != u.OrganizationID {
+			continue
+		}
+		if existing.Email == u.Email {
+			return entity.ErrAlreadyExists
+		}
+		if u.Username != nil && existing.Username != nil && *existing.Username == *u.Username {
+			return entity.ErrAlreadyExists
+		}
+	}
 	u.ID = util.NewUUID()
 	u.CreatedAt, u.UpdatedAt = time.Now(), time.Now()
 	f.byID[u.ID] = u
 	return nil
+}
+
+// snapshot/restore give FakeRegistrationTx (below) something to roll back
+// to — the same all-or-nothing guarantee a real Postgres transaction
+// gives database.WithTx, reproduced here so a unit test can assert
+// "failed registration leaves no partial state" without a database.
+func (f *FakeUserRepository) snapshot() map[string]*entity.User {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make(map[string]*entity.User, len(f.byID))
+	for k, v := range f.byID {
+		u := *v
+		cp[k] = &u
+	}
+	return cp
+}
+
+func (f *FakeUserRepository) restore(snapshot map[string]*entity.User) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byID = snapshot
 }
 
 func (f *FakeUserRepository) GetByID(_ context.Context, id string) (*entity.User, error) {
@@ -339,4 +380,115 @@ func (f *FakeLoginHistoryRepository) List(_ context.Context, organizationID stri
 		}
 	}
 	return out, nil
+}
+
+// FakeAuditLogRepository implements repository.AuditLogRepository.
+// Append reproduces the hash-chain behavior of
+// postgres.auditLogRepository.Append (each record's hash covers the
+// previous one) without any of the concurrency machinery real Postgres
+// needs — a single mutex is a perfectly adequate substitute for
+// pg_advisory_xact_lock when there's only ever one goroutine in a test.
+type FakeAuditLogRepository struct {
+	mu      sync.Mutex
+	Entries []*entity.AuditLogEntry
+	// FailNext, if non-nil, is returned by the next Append call instead of
+	// succeeding, then reset to nil — a deliberate fault injection point
+	// for exercising "the audit write failed, so the whole registration
+	// must roll back" without needing a real database to actually break.
+	FailNext error
+}
+
+func NewFakeAuditLogRepository() *FakeAuditLogRepository {
+	return &FakeAuditLogRepository{}
+}
+
+func (f *FakeAuditLogRepository) Append(_ context.Context, e *entity.AuditLogEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailNext != nil {
+		err := f.FailNext
+		f.FailNext = nil
+		return err
+	}
+	if len(f.Entries) > 0 {
+		prev := f.Entries[len(f.Entries)-1].RecordHash
+		e.PrevHash = &prev
+	}
+	e.ID = util.NewUUID()
+	e.RecordHash = util.NewUUID() // a real hash in postgres.auditLogRepository; identity is all a fake needs
+	e.OccurredAt = time.Now()
+	f.Entries = append(f.Entries, e)
+	return nil
+}
+
+func (f *FakeAuditLogRepository) GetByID(_ context.Context, id string) (*entity.AuditLogEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.Entries {
+		if e.ID == id {
+			return e, nil
+		}
+	}
+	return nil, entity.ErrNotFound
+}
+
+func (f *FakeAuditLogRepository) List(_ context.Context, organizationID string, _ repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.AuditLogEntry
+	for _, e := range f.Entries {
+		if e.OrganizationID != nil && *e.OrganizationID == organizationID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *FakeAuditLogRepository) LatestHash(_ context.Context, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.Entries) == 0 {
+		return "", nil
+	}
+	return f.Entries[len(f.Entries)-1].RecordHash, nil
+}
+
+func (f *FakeAuditLogRepository) snapshot() []*entity.AuditLogEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]*entity.AuditLogEntry, len(f.Entries))
+	copy(cp, f.Entries)
+	return cp
+}
+
+func (f *FakeAuditLogRepository) restore(snapshot []*entity.AuditLogEntry) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Entries = snapshot
+}
+
+// FakeRegistrationTx returns a closure structurally identical to
+// service.RegistrationTxFunc (Go allows assigning an unnamed func value to
+// a named func type with the same underlying signature, so callers don't
+// need to import this package's type — they just assign the return value
+// directly to a service.RegistrationTxFunc-typed field). It reproduces
+// database.WithTx's all-or-nothing guarantee — snapshot both fakes,run fn,
+// and roll back to the snapshot on error — so
+// internal/service/user_service_test.go can assert "a failed registration
+// leaves no partial state" without a real database. That guarantee is
+// only really proven by test/integration/register_test.go against actual
+// Postgres; this fake proves UserService.Register's own orchestration
+// treats the two writes as one unit, which is the half of the guarantee
+// that's this package's to prove.
+func FakeRegistrationTx(users *FakeUserRepository, audit *FakeAuditLogRepository) func(ctx context.Context, fn func(repository.UserRepository, repository.AuditLogRepository) error) error {
+	return func(ctx context.Context, fn func(repository.UserRepository, repository.AuditLogRepository) error) error {
+		usersSnapshot := users.snapshot()
+		auditSnapshot := audit.snapshot()
+		if err := fn(users, audit); err != nil {
+			users.restore(usersSnapshot)
+			audit.restore(auditSnapshot)
+			return err
+		}
+		return nil
+	}
 }

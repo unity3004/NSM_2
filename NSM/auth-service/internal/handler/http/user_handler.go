@@ -31,6 +31,45 @@ func (h *userHandler) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, http.StatusCreated, dto.UserResponseFromEntity(u))
 }
 
+// register implements POST /v1/auth/register — self-service signup,
+// distinct from create (POST /users, the admin/invite path) even though
+// both end up calling into the same UserService. It lives here, not on
+// authHandler, because the capability it calls (service.UserService.Register)
+// lives on UserService — the route path is a public contract
+// ("/auth/register" reads better to a caller than "/users/register" would
+// for something that isn't authenticated yet), but nothing requires the
+// handler struct that serves a path to match that path's first segment;
+// router.go is the only place the two are connected.
+func (h *userHandler) register(w http.ResponseWriter, r *http.Request) {
+	var req dto.RegisterRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeValidationError(w, r, err)
+		return
+	}
+
+	u, err := h.svc.Register(r.Context(), service.RegisterInput{
+		OrganizationID: organizationIDFromRequest(r),
+		Username:       req.Username,
+		Email:          req.Email,
+		Password:       req.Password,
+		IPAddress:      clientIP(r),
+	})
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, r, http.StatusCreated, dto.RegisterResponse{
+		ID:        u.ID,
+		Username:  *u.Username,
+		Email:     u.Email,
+		Status:    string(u.Status),
+		CreatedAt: u.CreatedAt,
+	})
+}
+
 func (h *userHandler) get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("userId")
 	u, err := h.svc.GetUser(r.Context(), id)

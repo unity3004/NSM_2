@@ -7,10 +7,34 @@ import (
 	"github.com/acme/auth-service/internal/entity"
 )
 
-// passwordPattern enforces the same complexity rule documented on
-// UserCreate.password in the OpenAPI spec: at least 12 characters, with at
-// least one lowercase, one uppercase, one digit, and one symbol.
-var passwordPattern = regexp.MustCompile(`^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{12,128}$`)
+// Password complexity — at least 12 characters, with at least one
+// lowercase, one uppercase, one digit, and one symbol, matching
+// UserCreate.password in the OpenAPI spec — is checked with four small
+// regexes combined in isPasswordComplexEnough, not one combined pattern
+// using (?=...) lookahead: Go's regexp package is RE2-based and RE2
+// deliberately does not implement lookahead (it trades that expressiveness
+// for a linear-time matching guarantee with no catastrophic-backtracking
+// risk). A single `^(?=.*[a-z])...$`-style pattern compiles fine in
+// PCRE-flavored regex engines (JavaScript, PHP, most online regex
+// testers) but is invalid syntax here — regexp.MustCompile panics at
+// package init if given one, which is exactly what happened the first
+// time a test file for this package actually ran: any lookahead pattern
+// in this file crashes the whole binary on startup, not just this one
+// validation call, because init() runs unconditionally before main().
+var (
+	hasLowercase = regexp.MustCompile(`[a-z]`)
+	hasUppercase = regexp.MustCompile(`[A-Z]`)
+	hasDigit     = regexp.MustCompile(`\d`)
+	hasSymbol    = regexp.MustCompile(`[^A-Za-z\d]`)
+)
+
+func isPasswordComplexEnough(password string) bool {
+	return len(password) >= 12 && len(password) <= 128 &&
+		hasLowercase.MatchString(password) &&
+		hasUppercase.MatchString(password) &&
+		hasDigit.MatchString(password) &&
+		hasSymbol.MatchString(password)
+}
 
 // UserCreateRequest matches components.schemas.UserCreate.
 type UserCreateRequest struct {
@@ -33,7 +57,7 @@ func (r UserCreateRequest) Validate() error {
 	// A password is required unless the invite flow will set one, or the
 	// account is SSO-only (no password at all — entity.User.PasswordHash
 	// stays nil in that case).
-	if r.Password != nil && !passwordPattern.MatchString(*r.Password) {
+	if r.Password != nil && !isPasswordComplexEnough(*r.Password) {
 		errs.Add("password", "must be at least 12 characters and include upper, lower, digit, and symbol")
 	}
 	return errs.Err()

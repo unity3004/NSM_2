@@ -12,14 +12,17 @@ import (
 )
 
 type userRepository struct {
-	db *sql.DB
+	db dbtx
 }
 
 // NewUserRepository returns a repository.UserRepository backed by
-// PostgreSQL. It takes *sql.DB (not the dbtx interface) because it's the
-// thing cmd/server/main.go wires up directly; individual methods still
-// accept a transaction where the use case needs one (see GrantRole).
-func NewUserRepository(db *sql.DB) repository.UserRepository {
+// PostgreSQL. It takes the package's dbtx interface, not a concrete
+// *sql.DB, so a caller orchestrating a multi-repository transaction (see
+// UserService.Register and database.WithTx) can construct a
+// transaction-scoped instance via NewUserRepository(tx) — *sql.Tx
+// satisfies dbtx exactly like *sql.DB does, so cmd/server/main.go's
+// existing NewUserRepository(db) call is unaffected.
+func NewUserRepository(db dbtx) repository.UserRepository {
 	return &userRepository{db: db}
 }
 

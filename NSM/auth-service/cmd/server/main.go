@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/acme/auth-service/internal/database"
 	httphandler "github.com/acme/auth-service/internal/handler/http"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/postgres"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/service"
@@ -75,6 +77,19 @@ func main() {
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(db)
 	loginHistoryRepo := postgres.NewLoginHistoryRepository(db)
 
+	// registerTx is the one place outside internal/repository/postgres
+	// itself that constructs a Postgres repository directly — exactly the
+	// wiring point service.RegistrationTxFunc's doc comment describes:
+	// database.WithTx opens the transaction, and the closure hands
+	// UserService.Register a UserRepository/AuditLogRepository pair
+	// scoped to it, so the users INSERT and the audit_logs INSERT commit
+	// or roll back together.
+	registerTx := func(ctx context.Context, fn func(repository.UserRepository, repository.AuditLogRepository) error) error {
+		return database.WithTx(ctx, db, func(tx *sql.Tx) error {
+			return fn(postgres.NewUserRepository(tx), postgres.NewAuditLogRepository(tx))
+		})
+	}
+
 	// --- shared infrastructure utilities ---
 	tokenSigner := util.NewJWTSigner(cfg.JWT.SigningKey, cfg.JWT.AccessTokenTTL)
 	// One PasswordService instance, shared by both services below, so
@@ -93,7 +108,7 @@ func main() {
 		Passwords:     passwordSvc,
 		RefreshTTL:    cfg.JWT.RefreshTokenTTL,
 	})
-	userSvc := service.NewUserService(userRepo, passwordSvc)
+	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{

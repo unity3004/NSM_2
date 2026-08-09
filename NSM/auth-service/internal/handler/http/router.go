@@ -46,7 +46,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// --- public: no bearer token exists yet at this point in the flow ---
 	mux.HandleFunc("POST /v1/auth/login", auth.login)
 	mux.HandleFunc("POST /v1/auth/token/refresh", auth.refresh)
-	mux.HandleFunc("POST /v1/users", users.create) // invite/self-registration
+	mux.HandleFunc("POST /v1/auth/register", users.register) // self-service signup
+	mux.HandleFunc("POST /v1/users", users.create)           // admin/invite path
 
 	// --- protected: every route below requires a verified access token ---
 	mux.Handle("POST /v1/auth/logout", requireAuth(http.HandlerFunc(auth.logout)))
