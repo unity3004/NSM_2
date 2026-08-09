@@ -22,6 +22,13 @@ type FakeUserRepository struct {
 	mu    sync.Mutex
 	byID  map[string]*entity.User
 	roles map[string][]*entity.UserRole
+	// FailNextGetByEmail, if non-nil, is returned by the next GetByEmail
+	// call instead of the normal lookup, then reset to nil — a fault
+	// injection point for exercising "the database itself is unavailable"
+	// (a plain internal error, distinct from entity.ErrNotFound) without a
+	// real database to actually take down. See
+	// internal/service/auth_service_test.go's database-failure test.
+	FailNextGetByEmail error
 }
 
 func NewFakeUserRepository() *FakeUserRepository {
@@ -104,6 +111,11 @@ func (f *FakeUserRepository) GetByID(_ context.Context, id string) (*entity.User
 func (f *FakeUserRepository) GetByEmail(_ context.Context, organizationID, email string) (*entity.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextGetByEmail != nil {
+		err := f.FailNextGetByEmail
+		f.FailNextGetByEmail = nil
+		return nil, err
+	}
 	for _, u := range f.byID {
 		if u.OrganizationID == organizationID && u.Email == email {
 			cp := *u

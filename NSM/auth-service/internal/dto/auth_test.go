@@ -119,6 +119,64 @@ func TestRegisterRequest_Validate_ReportsEveryFieldAtOnce(t *testing.T) {
 	}
 }
 
+// --- LoginRequest ---
+
+func validLoginRequest() LoginRequest {
+	return LoginRequest{Email: "marcus.webb@acme.com", Password: "Tr0ub4dor&3xample!"}
+}
+
+func TestLoginRequest_Validate_Succeeds(t *testing.T) {
+	if err := validLoginRequest().Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestLoginRequest_Validate_InvalidEmail(t *testing.T) {
+	tests := map[string]string{
+		"empty":          "",
+		"no @":           "marcus.webb-acme.com",
+		"no domain":      "marcus.webb@",
+		"has whitespace": "marcus webb@acme.com",
+	}
+	for name, email := range tests {
+		t.Run(name, func(t *testing.T) {
+			req := validLoginRequest()
+			req.Email = email
+			err := req.Validate()
+			if err == nil {
+				t.Fatalf("Validate() with email %s = nil, want an error", name)
+			}
+			fieldIssue(t, err, "email")
+		})
+	}
+}
+
+func TestLoginRequest_Validate_MissingPassword(t *testing.T) {
+	req := validLoginRequest()
+	req.Password = ""
+
+	err := req.Validate()
+	if err == nil {
+		t.Fatal("Validate() with empty password = nil, want an error")
+	}
+	if issue := fieldIssue(t, err, "password"); !strings.Contains(issue, "required") {
+		t.Errorf("password issue = %q, want it to mention 'required'", issue)
+	}
+}
+
+// TestLoginRequest_Validate_PasswordComplexityNotEnforced pins the
+// deliberate difference from RegisterRequest.Validate: login only checks
+// that a password was supplied, never its shape — see LoginRequest.Validate's
+// own doc comment for why (complexity is a signup/reset-time rule, and a
+// weak password stored under an old policy must still be able to log in).
+func TestLoginRequest_Validate_PasswordComplexityNotEnforced(t *testing.T) {
+	req := validLoginRequest()
+	req.Password = "short"
+	if err := req.Validate(); err != nil {
+		t.Errorf("Validate() with a short (but non-empty) password = %v, want nil", err)
+	}
+}
+
 func TestRegisterResponse_NeverEncodesPasswordFields(t *testing.T) {
 	// A structural guarantee, asserted rather than just assumed: there is
 	// no field on RegisterResponse whose JSON tag could ever contain

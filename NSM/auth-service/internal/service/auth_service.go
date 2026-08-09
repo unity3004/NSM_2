@@ -41,6 +41,16 @@ type LoginMeta struct {
 	UserAgent string
 }
 
+// AuditTxFunc appends one audit_logs row inside its own transaction — the
+// single-repository sibling of RegistrationTxFunc (see user_service.go).
+// It exists even for a single Append because
+// postgres.auditLogRepository.Append's hash-chain concurrency guarantee
+// (pg_advisory_xact_lock) only serializes concurrent appends to the same
+// organization when it runs inside a real transaction; handing Login a
+// bare *sql.DB-backed repository instead would silently reintroduce a
+// hash-chain race between two concurrent logins.
+type AuditTxFunc func(ctx context.Context, fn func(repository.AuditLogRepository) error) error
+
 type AuthServiceDeps struct {
 	Users         repository.UserRepository
 	Sessions      repository.SessionRepository
@@ -54,6 +64,10 @@ type AuthServiceDeps struct {
 	// algorithm and parameters.
 	Passwords  *security.PasswordService
 	RefreshTTL time.Duration
+	// AuditTx records the audit_logs half of a login attempt — see
+	// AuditTxFunc. A nil AuditTx skips audit-logging for login entirely,
+	// which existing tests that don't care about it rely on.
+	AuditTx AuditTxFunc
 }
 
 type AuthService struct {
@@ -78,6 +92,12 @@ type LoginResult struct {
 // so a failure can never be invisible to brute-force detection just
 // because it returned early.
 func (s *AuthService) Login(ctx context.Context, organizationID string, email, password string, meta LoginMeta) (*LoginResult, error) {
+	// Normalized the same way Register normalizes before its own
+	// uniqueness check (see UserService.Register / util.NormalizeEmail) —
+	// a login for "Marcus.Webb@ACME.com " must find the same row a
+	// registration for "marcus.webb@acme.com" created.
+	email = util.NormalizeEmail(email)
+
 	now := time.Now()
 	entry := &entity.LoginHistoryEntry{
 		OrganizationID:      &organizationID,
@@ -88,6 +108,7 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	var loginErr error
 	defer func() {
 		_ = s.deps.LoginHistory.Record(ctx, entry) // best-effort: never blocks or masks loginErr
+		s.recordLoginAudit(ctx, organizationID, entry, meta)
 	}()
 
 	user, err := s.deps.Users.GetByEmail(ctx, organizationID, email)
@@ -97,6 +118,11 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 		return nil, loginErr
 	}
 	if err != nil {
+		// A genuine lookup failure (database unavailable, etc.) — distinct
+		// from "no such user" above, and must stay distinct internally even
+		// though writeServiceError's default branch already keeps the
+		// external response equally generic either way.
+		entry.Status = entity.LoginFailureOther
 		loginErr = err
 		return nil, loginErr
 	}
@@ -174,6 +200,48 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	logging.FromContext(ctx).Info("login succeeded",
 		zap.String("user_id", user.ID), zap.String("session_id", session.ID))
 	return result, nil
+}
+
+// recordLoginAudit best-effort appends one audit_logs row for this login
+// attempt, derived from the already-populated login_history entry so the
+// two records can never disagree about what happened. Like the
+// LoginHistory.Record call beside it, a failure here is logged and
+// swallowed, never surfaced to the caller: audit_logs is an observability
+// record of an attempt against an already-durable user row, not a write
+// anything else needs to be atomic with (contrast UserService.Register,
+// where the audit write and the user INSERT it describes must commit or
+// roll back together).
+func (s *AuthService) recordLoginAudit(ctx context.Context, organizationID string, entry *entity.LoginHistoryEntry, meta LoginMeta) {
+	if s.deps.AuditTx == nil {
+		return
+	}
+
+	result := entity.AuditResultFailure
+	metadata := map[string]any{}
+	if entry.Status == entity.LoginSuccess {
+		result = entity.AuditResultSuccess
+	} else {
+		metadata["failure_reason"] = string(entry.Status)
+	}
+
+	audit := &entity.AuditLogEntry{
+		OrganizationID: &organizationID,
+		ActorType:      entity.AuditActorUser,
+		ActorID:        entry.UserID,
+		Action:         "user.login",
+		ResourceType:   strPtr("user"),
+		ResourceID:     entry.UserID,
+		Result:         result,
+		IPAddress:      strPtr(meta.IPAddress),
+		Metadata:       metadata,
+	}
+	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
+		return repo.Append(ctx, audit)
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record login audit event",
+			zap.String("organization_id", organizationID), zap.Error(err))
+	}
 }
 
 // issueSession mints a session, its first refresh token, and a matching

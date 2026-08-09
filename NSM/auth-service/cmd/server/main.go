@@ -90,6 +90,16 @@ func main() {
 		})
 	}
 
+	// loginAuditTx is service.AuthServiceDeps.AuditTx's wiring point — the
+	// single-repository sibling of registerTx above, for the same reason:
+	// postgres.NewAuditLogRepository's hash-chain lock only serializes
+	// correctly when it runs against a *sql.Tx, never a bare *sql.DB.
+	loginAuditTx := func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return database.WithTx(ctx, db, func(tx *sql.Tx) error {
+			return fn(postgres.NewAuditLogRepository(tx))
+		})
+	}
+
 	// --- shared infrastructure utilities ---
 	tokenSigner := util.NewJWTSigner(cfg.JWT.SigningKey, cfg.JWT.AccessTokenTTL)
 	// One PasswordService instance, shared by both services below, so
@@ -107,6 +117,7 @@ func main() {
 		Tokens:        tokenSigner,
 		Passwords:     passwordSvc,
 		RefreshTTL:    cfg.JWT.RefreshTokenTTL,
+		AuditTx:       loginAuditTx,
 	})
 	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
 
