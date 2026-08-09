@@ -142,13 +142,20 @@ func main() {
 		RefreshTTL:          cfg.RefreshToken.TTL,
 		AuditTx:             loginAuditTx,
 	})
+	logoutSvc := service.NewLogoutService(service.LogoutServiceDeps{
+		Sessions: sessionSvc,
+		AuditTx:  loginAuditTx,
+	})
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,
 		UserService:         userSvc,
 		RefreshTokenService: refreshTokenSvc,
+		LogoutService:       logoutSvc,
 		TokenAuth:           tokenSigner,
+		AccessTokens:        accessTokens,
+		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
 		AllowedOrigins:      cfg.Server.AllowedOrigins,
 		Logger:              logger,
 	})

@@ -45,14 +45,20 @@ const authenticatedIdentityKey identityCtxKey = 0
 // request context, if any — the one way a downstream handler learns who
 // made the request. There is no way to retrieve a raw token string
 // through this accessor: AuthenticatedIdentity has no field for one, and
-// withIdentity below is the only code in this package that writes to
+// WithIdentity below is the only code that writes to
 // authenticatedIdentityKey.
 func IdentityFromContext(ctx context.Context) (AuthenticatedIdentity, bool) {
 	id, ok := ctx.Value(authenticatedIdentityKey).(AuthenticatedIdentity)
 	return id, ok
 }
 
-func withIdentity(ctx context.Context, id AuthenticatedIdentity) context.Context {
+// WithIdentity returns a context carrying id — exported for the same
+// reason logging.WithContext is: a handler-level test (Milestone 6B's
+// logout_handler_test.go, for one) needs to place a fully-controlled
+// identity on a request context without running a real token through
+// Authenticate first, and any future non-HTTP caller that already has a
+// validated identity from elsewhere would need the same seam.
+func WithIdentity(ctx context.Context, id AuthenticatedIdentity) context.Context {
 	return context.WithValue(ctx, authenticatedIdentityKey, id)
 }
 
@@ -107,7 +113,7 @@ func Authenticate(tokens *security.TokenService, audience string) func(http.Hand
 				Subject: claims.Subject,
 				TokenID: claims.ID,
 			}
-			next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
+			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), identity)))
 		})
 	}
 }

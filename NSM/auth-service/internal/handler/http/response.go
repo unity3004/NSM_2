@@ -88,6 +88,15 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &locked):
 		writeErrorEnvelope(w, r, http.StatusLocked, dto.CodeAccountLocked,
 			"Account is locked until "+locked.Until.Format(http.TimeFormat)+".", nil)
+	case errors.Is(err, service.ErrMissingSessionIdentity):
+		// The authenticated identity had no session ID to act on — an
+		// authentication/session design error (Milestone 6B requirement
+		// #23), reported identically to any other authentication
+		// failure: the same code and message writeUnauthenticated itself
+		// uses, never a distinct signal a client could use to tell "your
+		// token structurally can't be used for this" apart from "your
+		// token is simply invalid."
+		writeErrorEnvelope(w, r, http.StatusUnauthorized, dto.CodeUnauthenticated, "Access token is missing or invalid.", nil)
 	case errors.Is(err, entity.ErrInvalidCredentials):
 		writeErrorEnvelope(w, r, http.StatusUnauthorized, dto.CodeInvalidCredentials, "Email or password is incorrect.", nil)
 	case errors.Is(err, entity.ErrAccountDisabled):

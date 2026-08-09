@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/acme/auth-service/internal/middleware"
+	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/service"
 	"github.com/acme/auth-service/internal/util"
 )
@@ -18,7 +19,16 @@ type RouterDeps struct {
 	// AuthService's own POST /v1/auth/token/refresh rather than a
 	// replacement for it.
 	RefreshTokenService *service.RefreshTokenService
-	TokenAuth           *util.JWTSigner
+	// LogoutService backs POST /v1/auth/logout/current (Milestone 6B) —
+	// see logout_handler.go's doc comment for why it's a separate route
+	// from AuthService's own POST /v1/auth/logout.
+	LogoutService *service.LogoutService
+	TokenAuth     *util.JWTSigner
+	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
+	// (Milestone 6A) — the first route in this router to actually require
+	// it, since it's the first milestone with a concrete reason to.
+	AccessTokens        *security.TokenService
+	AccessTokenAudience string
 	// AllowedOrigins configures middleware.CORS.
 	AllowedOrigins []string
 	// Logger is the base logger middleware.RequestID derives every
@@ -45,7 +55,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	auth := &authHandler{svc: deps.AuthService}
 	users := &userHandler{svc: deps.UserService}
 	refresh := &refreshHandler{svc: deps.RefreshTokenService}
+	logout := &logoutHandler{svc: deps.LogoutService}
 	requireAuth := middleware.Auth(deps.TokenAuth)
+	requireAccessToken := middleware.Authenticate(deps.AccessTokens, deps.AccessTokenAudience)
 
 	mux.HandleFunc("GET /healthz", healthCheck)
 
@@ -57,7 +69,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux.HandleFunc("POST /v1/users", users.create)              // admin/invite path
 
 	// --- protected: every route below requires a verified access token ---
-	mux.Handle("POST /v1/auth/logout", requireAuth(http.HandlerFunc(auth.logout)))
+	mux.Handle("POST /v1/auth/logout", requireAuth(http.HandlerFunc(auth.logout)))                  // pre-existing AuthService-backed flow, unchanged
+	mux.Handle("POST /v1/auth/logout/current", requireAccessToken(http.HandlerFunc(logout.logout))) // Milestone 6B: LogoutService-backed flow
 	mux.Handle("GET /v1/users", requireAuth(http.HandlerFunc(users.list)))
 	mux.Handle("GET /v1/users/{userId}", requireAuth(http.HandlerFunc(users.get)))
 	mux.Handle("DELETE /v1/users/{userId}", requireAuth(http.HandlerFunc(users.delete)))
