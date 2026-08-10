@@ -80,6 +80,34 @@ jobs:
           DATABASE_URL: postgres://authsvc:testpassword@localhost:5432/authdb_test?sslmode=disable
           REDIS_ADDR: localhost:6379
 
+      # E2E tests build the real router (httphandler.NewRouter) with a real
+      # access-token signing key, the same way cmd/server/main.go does — see
+      # test/e2e/setup_test.go. cmd/devkeygen writes a disposable,
+      # CI-only Ed25519 key, gitignored (docker/.dev-secrets/) purely so
+      # config.Validate's hard requirement for one is satisfied; it's
+      # discarded with the runner. Written to an absolute path
+      # (github.workspace), not devkeygen's default relative one: `go test`
+      # runs the compiled test binary with its working directory set to the
+      # package under test (test/e2e/), not the repo root, so a
+      # repo-root-relative path here would resolve to test/e2e/docker/... and
+      # fail to load — the same reason test/e2e/setup_test.go's own
+      # loadFixtures uses "../fixtures" rather than a repo-root-relative path.
+      - name: Generate E2E access-token signing key
+        run: go run ./cmd/devkeygen "${{ github.workspace }}/docker/.dev-secrets/access-token-signing-key.pem"
+
+      - name: E2E tests
+        run: go test ./test/e2e/... -tags=e2e -race
+        env:
+          AUTH_ENVIRONMENT: development
+          # Same non-secret placeholder docker/docker-compose.yml's app
+          # service already uses for local dev — not a real secret, just a
+          # 32+ char value satisfying config.Validate's length check.
+          AUTH_JWT_SIGNING_KEY: local-development-signing-key-not-for-prod-use
+          AUTH_DATABASE_URL: postgres://authsvc:testpassword@localhost:5432/authdb_test?sslmode=disable
+          AUTH_ACCESS_TOKEN_KEY_ID: dev-key-1
+          AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH: ${{ github.workspace }}/docker/.dev-secrets/access-token-signing-key.pem
+          AUTH_REDIS_ADDR: localhost:6379
+
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
