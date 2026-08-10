@@ -466,17 +466,75 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string) (*Login
 
 // Logout implements POST /auth/logout: revoke the session and, if the
 // client still holds it, the refresh-token family riding alongside it.
-func (s *AuthService) Logout(ctx context.Context, sessionID string, rawRefreshToken *string) error {
+// Every exit path writes exactly one best-effort audit_logs row via the
+// deferred call below — the same "never invisible to an investigation just
+// because it returned early" guarantee Login's login_history write and
+// RefreshTokenService.Refresh's own audit write already make; this method
+// previously made no such write at all.
+func (s *AuthService) Logout(ctx context.Context, userID, sessionID string, rawRefreshToken *string, meta LoginMeta) error {
+	var logoutErr error
+	defer func() {
+		s.recordLogoutAudit(ctx, userID, sessionID, logoutErr, meta)
+	}()
+
 	if rawRefreshToken != nil {
 		if rt, err := s.deps.RefreshTokens.GetByTokenHash(ctx, util.HashToken(*rawRefreshToken)); err == nil {
 			_ = s.deps.RefreshTokens.RevokeFamily(ctx, rt.FamilyID, entity.RevocationLogout)
 		}
 	}
 	if err := s.deps.Sessions.Revoke(ctx, sessionID, entity.RevocationLogout); err != nil {
-		return err
+		logoutErr = err
+		return logoutErr
 	}
 	logging.FromContext(ctx).Info("logout", zap.String("session_id", sessionID))
 	return nil
+}
+
+// recordLogoutAudit best-effort appends one audit_logs row per logout
+// attempt — Action "auth.logout", the same action name
+// LogoutService.recordLogoutAudit already uses for the Milestone 6B flow,
+// so the two logout paths' audit trails are never distinguishable by
+// action name alone. logoutFailureReason is shared with that method
+// (defined once, in logout_service.go, in this same package) rather than
+// duplicated. A failure here is logged and swallowed, never surfaced to
+// the caller, the same convention every other audit write in this file
+// already follows.
+func (s *AuthService) recordLogoutAudit(ctx context.Context, userID, sessionID string, logoutErr error, meta LoginMeta) {
+	if s.deps.AuditTx == nil {
+		return
+	}
+
+	result := entity.AuditResultSuccess
+	metadata := map[string]any{}
+	if logoutErr != nil {
+		result = entity.AuditResultFailure
+		metadata["failure_reason"] = logoutFailureReason(logoutErr)
+	}
+
+	var actorID, resourceID *string
+	if userID != "" {
+		actorID = &userID
+	}
+	if sessionID != "" {
+		resourceID = &sessionID
+	}
+
+	audit := &entity.AuditLogEntry{
+		ActorType:    entity.AuditActorUser,
+		ActorID:      actorID,
+		Action:       "auth.logout",
+		ResourceType: strPtr("session"),
+		ResourceID:   resourceID,
+		Result:       result,
+		IPAddress:    strPtr(meta.IPAddress),
+		Metadata:     metadata,
+	}
+	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
+		return repo.Append(ctx, audit)
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record logout audit event", zap.Error(err))
+	}
 }
 
 func strPtr(s string) *string {

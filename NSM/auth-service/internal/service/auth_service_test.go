@@ -383,6 +383,78 @@ func TestLogin_RecordsAuditEventOnFailure(t *testing.T) {
 	}
 }
 
+// TestLogout_RecordsAuditEventOnSuccess proves AuthService.Logout writes a
+// real audit_logs row — previously-missing behavior, found and fixed as
+// part of Sprint 2 E2E-03 (see test/e2e/logout_session_revocation_test.go).
+func TestLogout_RecordsAuditEventOnSuccess(t *testing.T) {
+	svc, users, _, _, audit := newTestAuthService(t)
+	u := seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")
+
+	result, err := svc.Login(t.Context(), "org-1", "marcus.webb@acme.com", "Tr0ub4dor&3xample!", LoginMeta{})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	audit.Entries = nil // Login already wrote its own audit row; isolate Logout's.
+
+	if err := svc.Logout(t.Context(), u.ID, result.SessionID, &result.RefreshToken, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+
+	if len(audit.Entries) != 1 {
+		t.Fatalf("audit_logs has %d entries after logout, want 1", len(audit.Entries))
+	}
+	entry := audit.Entries[0]
+	if entry.Action != "auth.logout" {
+		t.Errorf("audit action = %q, want %q", entry.Action, "auth.logout")
+	}
+	if entry.Result != entity.AuditResultSuccess {
+		t.Errorf("audit result = %q, want %q", entry.Result, entity.AuditResultSuccess)
+	}
+	if entry.ActorID == nil || *entry.ActorID != u.ID {
+		t.Errorf("audit actor_id = %v, want %q", entry.ActorID, u.ID)
+	}
+	if entry.ResourceID == nil || *entry.ResourceID != result.SessionID {
+		t.Errorf("audit resource_id = %v, want %q", entry.ResourceID, result.SessionID)
+	}
+	for k, v := range entry.Metadata {
+		if s, ok := v.(string); ok && strings.Contains(s, result.RefreshToken) {
+			t.Errorf("audit metadata[%q] = %q contains the raw refresh token", k, s)
+		}
+	}
+}
+
+// TestLogout_RecordsAuditEventOnFailure mirrors
+// TestLogin_RecordsAuditEventOnFailure's never-carries-a-secret
+// requirement for Logout's own failure branch.
+func TestLogout_RecordsAuditEventOnFailure(t *testing.T) {
+	svc, users, _, _, audit := newTestAuthService(t)
+	u := seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")
+
+	result, err := svc.Login(t.Context(), "org-1", "marcus.webb@acme.com", "Tr0ub4dor&3xample!", LoginMeta{})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	audit.Entries = nil
+
+	const bogusSessionID = "00000000-0000-4000-8000-000000000000"
+	if err := svc.Logout(t.Context(), u.ID, bogusSessionID, &result.RefreshToken, LoginMeta{}); err == nil {
+		t.Fatal("Logout() with a nonexistent session ID = nil error, want one")
+	}
+
+	if len(audit.Entries) != 1 {
+		t.Fatalf("audit_logs has %d entries after a failed logout, want 1", len(audit.Entries))
+	}
+	entry := audit.Entries[0]
+	if entry.Result != entity.AuditResultFailure {
+		t.Errorf("audit result = %q, want %q", entry.Result, entity.AuditResultFailure)
+	}
+	for k, v := range entry.Metadata {
+		if s, ok := v.(string); ok && strings.Contains(s, result.RefreshToken) {
+			t.Errorf("audit metadata[%q] = %q contains the raw refresh token", k, s)
+		}
+	}
+}
+
 func TestRefreshToken_RotatesAndDetectsReuse(t *testing.T) {
 	svc, users, _, _, _ := newTestAuthService(t)
 	seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")

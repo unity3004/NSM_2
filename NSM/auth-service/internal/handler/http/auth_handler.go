@@ -108,7 +108,10 @@ func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
 		writeErrorEnvelope(w, r, http.StatusUnauthorized, dto.CodeUnauthenticated, "Access token is missing or invalid.", nil)
 		return
 	}
-	if err := h.svc.Logout(r.Context(), claims.SessionID, body.RefreshToken); err != nil {
+	if err := h.svc.Logout(r.Context(), claims.Subject, claims.SessionID, body.RefreshToken, service.LoginMeta{
+		IPAddress: clientIP(r),
+		UserAgent: r.UserAgent(),
+	}); err != nil {
 		writeServiceError(w, r, err)
 		return
 	}

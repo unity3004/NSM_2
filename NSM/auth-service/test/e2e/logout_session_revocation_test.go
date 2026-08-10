@@ -48,6 +48,12 @@ import (
 // entity.ErrNotFound -> a 404 NOT_FOUND on a repeated logout, not a second
 // 204. See TestE2E_Logout_RepeatedLogout below, which asserts the actual
 // observed behavior rather than an assumed one.
+//
+// A third finding — service.AuthService.Logout wrote no audit_logs row at
+// all, unlike Login, Refresh, and the (unreachable) Milestone 6B logout
+// flow — was reported and has since been fixed: see
+// service.AuthService.recordLogoutAudit. This suite's AuditEvents subtest
+// now verifies the real, current behavior.
 
 // registerUser performs registration only (no login) — used by the
 // multi-session scenario, which needs to log in as the same user twice.
@@ -293,35 +299,41 @@ func TestE2E_LogoutSessionRevocation(t *testing.T) {
 		}
 	})
 
-	// --- Phase 10 (audit) and Phase 11 (Redis): the real, observed
-	// behavior — proven below, not assumed — is that service.AuthService.Logout
-	// (the endpoint under test, the only logout endpoint any real HTTP flow
-	// can reach) writes NO audit_logs row at all. Unlike Login, Refresh,
-	// and the unreachable Milestone 6B logout/current endpoint (whose
-	// service.LogoutService.Logout does call AuditTx, recording
-	// action="auth.logout" — see recordLogoutAudit), AuthServiceDeps has no
-	// audit call anywhere inside Logout(); it only emits a zap log line.
-	// This means there is currently no way to produce a real, end-to-end-
-	// reachable auth.logout audit record anywhere in this system — a
-	// genuine compliance gap, reported in the final report's "remaining
-	// security gaps" rather than silently fixed here (see this milestone's
-	// own "do not redesign the authentication architecture" / "smallest
-	// clean changes" instructions). This subtest asserts the actual
-	// current behavior specifically so it fails loudly — as a prompt to
-	// update the assertion, not just delete it — the day audit logging is
-	// intentionally added to this endpoint.
-	//
-	// Redis: AuthServiceDeps carries no ratelimit dependency for Logout at
-	// all (unlike Login/Refresh) — confirmed by source inspection. Logout
-	// does not touch Redis in this architecture; there is no state to
-	// inspect.
-	t.Run("AuditEvents_NoneRecordedByThisEndpoint", func(t *testing.T) {
+	// --- Phase 10 (audit): AuthService.Logout previously wrote no
+	// audit_logs row at all — a real gap this suite found and reported.
+	// It has since been fixed (see service.AuthService.recordLogoutAudit,
+	// added deliberately to mirror LogoutService.recordLogoutAudit's own
+	// action name and shape so the two logout paths are never
+	// distinguishable by action name alone) and this subtest now verifies
+	// the real, current behavior — a genuine auth.logout row, in real
+	// Postgres, containing no secret. ---
+	t.Run("AuditEvents", func(t *testing.T) {
 		entries := assertLogoutAuditClean(t, env, sessionID, refreshToken, accessToken)
-		if len(entries) != 0 {
-			t.Errorf("auth.logout audit entries for this session = %d, want 0 (AuthService.Logout does not audit-log today) — "+
-				"if audit logging was intentionally added to this endpoint, update this assertion to match, don't just delete it", len(entries))
+		if len(entries) == 0 {
+			t.Fatal("no auth.logout audit entry was recorded")
+		}
+		found := false
+		for _, e := range entries {
+			if e.Result != "success" {
+				continue
+			}
+			found = true
+			if !e.ActorID.Valid {
+				t.Error("success audit entry has no actor_id")
+			}
+			if !e.ResourceID.Valid || e.ResourceID.String != sessionID {
+				t.Errorf("audit entry resource_id = %v, want %q", e.ResourceID, sessionID)
+			}
+		}
+		if !found {
+			t.Error("no successful auth.logout audit entry was recorded")
 		}
 	})
+
+	// --- Phase 11 (Redis): AuthServiceDeps carries no ratelimit
+	// dependency for Logout at all (unlike Login/Refresh) — confirmed by
+	// source inspection. Logout does not touch Redis in this
+	// architecture; there is no state to inspect. ---
 }
 
 // TestE2E_Logout_OtherSessionsUnaffected is Phase 9: two independent real
