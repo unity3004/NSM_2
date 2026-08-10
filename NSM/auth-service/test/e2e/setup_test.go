@@ -55,10 +55,16 @@ const fixtureOrgID = "00000000-0000-4000-8000-000000000001"
 // request behavior (router, middleware, services, repositories) is built
 // exactly as cmd/server/main.go builds it, from the same config.Load().
 type e2eEnv struct {
-	Server              *httptest.Server
-	DB                  *sql.DB
-	Tokens              *util.JWTSigner           // the exact signer AuthService.Login signs access tokens with
-	Passwords           *security.PasswordService // the exact service UserService/AuthService hash and verify passwords with
+	Server    *httptest.Server
+	DB        *sql.DB
+	Tokens    *util.JWTSigner           // the exact signer AuthService.Login signs access tokens with
+	Passwords *security.PasswordService // the exact service UserService/AuthService hash and verify passwords with
+	// AccessTokens is the exact Ed25519 security.TokenService instance
+	// RefreshTokenService.Refresh mints POST /v1/auth/refresh's access
+	// token with — needed so an E2E test can verify that token via the
+	// application's own real verification mechanism (ValidateAccessToken)
+	// without going through a live HTTP round trip a second time.
+	AccessTokens        *security.TokenService
 	AccessTokenAudience string
 }
 
@@ -203,6 +209,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		DB:                  db,
 		Tokens:              tokenSigner,
 		Passwords:           passwordSvc,
+		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
 	}
 }
