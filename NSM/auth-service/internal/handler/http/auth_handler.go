@@ -1,6 +1,7 @@
 package http
 
 import (
+	"net"
 	"net/http"
 
 	"github.com/acme/auth-service/internal/dto"
@@ -21,11 +22,21 @@ func organizationIDFromRequest(r *http.Request) string {
 	return r.Header.Get("X-Organization-Id")
 }
 
+// clientIP returns a bare IP address — never host:port — since every
+// caller ultimately stores this in an INET column (sessions, login_history,
+// audit_logs), which rejects a port suffix. r.RemoteAddr is always
+// "ip:port" in net/http; net.SplitHostPort strips it. X-Forwarded-For, when
+// present, is assumed to already be a bare IP (a reverse proxy's own
+// header, not something net/http formats for us) and is returned as-is.
 func clientIP(r *http.Request) string {
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		return fwd
 	}
-	return r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {

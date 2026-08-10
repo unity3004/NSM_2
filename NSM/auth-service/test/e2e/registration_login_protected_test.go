@@ -152,11 +152,6 @@ func TestE2E_RegistrationLoginProtectedAPI(t *testing.T) {
 		assertNoForbiddenFields(t, "POST /v1/auth/register response", raw, "refresh_token", "access_token")
 
 		userID = out.ID
-		t.Cleanup(func() {
-			if _, err := env.DB.Exec(`DELETE FROM users WHERE id = $1`, userID); err != nil {
-				t.Logf("cleanup: delete users row %s: %v", userID, err)
-			}
-		})
 
 		// --- Real-PostgreSQL persistence boundary: query the database
 		// directly, the same connection pool the app itself uses, never
@@ -197,6 +192,16 @@ func TestE2E_RegistrationLoginProtectedAPI(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("registration did not succeed; aborting dependent scenarios")
 	}
+	// Registered on the outer test, not the "Registration" subtest above:
+	// t.Cleanup runs when the T it was registered against finishes, and the
+	// "Login" and "ProtectedEndpoint_*" subtests below still need this row
+	// to exist. Registering it inside the subtest would delete the user
+	// before Login ever ran.
+	t.Cleanup(func() {
+		if _, err := env.DB.Exec(`DELETE FROM users WHERE id = $1`, userID); err != nil {
+			t.Logf("cleanup: delete users row %s: %v", userID, err)
+		}
+	})
 
 	var accessToken, sessionID string
 
