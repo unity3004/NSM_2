@@ -25,7 +25,7 @@ services:
   # redis:6379 from inside this compose network, is what
   # test/integration/ratelimit_test.go and the app service below expect.
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     ports:
       - "6379:6379"
     healthcheck:

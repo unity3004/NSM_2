@@ -52,7 +52,7 @@ jobs:
       # (Milestone 6C) needs a real Redis for test/integration/ratelimit_test.go
       # to actually run instead of skipping.
       redis:
-        image: redis:7-alpine
+        image: redis:7.4-alpine
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
