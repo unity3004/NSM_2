@@ -19,6 +19,8 @@ import (
 	"github.com/acme/auth-service/internal/database"
 	httphandler "github.com/acme/auth-service/internal/handler/http"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/ratelimit"
+	redisclient "github.com/acme/auth-service/internal/redis"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/postgres"
 	"github.com/acme/auth-service/internal/security"
@@ -120,16 +122,58 @@ func main() {
 	}
 	accessTokens := security.NewTokenService(signingKeys, cfg.AccessToken.Issuer, cfg.AccessToken.TTL)
 
+	// abuseProtection (Milestone 6C) defaults to allowing everything —
+	// the posture for a deployment that hasn't turned rate_limit.enabled
+	// on yet — and is only replaced with the real Redis-backed
+	// implementation when it is. AuthService/RefreshTokenService always
+	// hold a non-nil AuthAbuseProtection either way; see
+	// ratelimit.NoopAuthAbuseProtection's own doc comment.
+	var abuseProtection ratelimit.AuthAbuseProtection = ratelimit.NoopAuthAbuseProtection{}
+	if cfg.RateLimit.Enabled {
+		redisClient, err := redisclient.NewClient(ctx, cfg.Redis)
+		if err != nil {
+			logger.Error("failed to connect to redis", zap.Error(err))
+			os.Exit(1)
+		}
+		defer redisClient.Close()
+
+		abuseProtection = ratelimit.NewRedisAuthAbuseProtection(redisClient, ratelimit.Config{
+			FailClosed: cfg.RateLimit.FailClosed,
+			Operations: map[string]ratelimit.OperationPolicy{
+				ratelimit.OperationLogin: {
+					IP: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.Login.IPWindow, Limit: cfg.RateLimit.Login.IPLimit, BlockDuration: cfg.RateLimit.Login.BlockDuration,
+					},
+					Account: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.Login.AccountWindow, Limit: cfg.RateLimit.Login.AccountLimit, BlockDuration: cfg.RateLimit.Login.BlockDuration,
+					},
+					Pair: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.Login.PairWindow, Limit: cfg.RateLimit.Login.PairLimit, BlockDuration: cfg.RateLimit.Login.BlockDuration,
+					},
+				},
+				// Refresh is deliberately IP-only — see
+				// RefreshTokenServiceDeps.AbuseProtection's doc comment.
+				ratelimit.OperationRefresh: {
+					IP: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.Refresh.IPWindow, Limit: cfg.RateLimit.Refresh.IPLimit, BlockDuration: cfg.RateLimit.Refresh.BlockDuration,
+					},
+				},
+			},
+		})
+	}
+
 	// --- services (use cases, depend only on repository interfaces) ---
 	authSvc := service.NewAuthService(service.AuthServiceDeps{
-		Users:         userRepo,
-		Sessions:      sessionRepo,
-		RefreshTokens: refreshTokenRepo,
-		LoginHistory:  loginHistoryRepo,
-		Tokens:        tokenSigner,
-		Passwords:     passwordSvc,
-		RefreshTTL:    cfg.JWT.RefreshTokenTTL,
-		AuditTx:       loginAuditTx,
+		Users:               userRepo,
+		Sessions:            sessionRepo,
+		RefreshTokens:       refreshTokenRepo,
+		LoginHistory:        loginHistoryRepo,
+		Tokens:              tokenSigner,
+		Passwords:           passwordSvc,
+		RefreshTTL:          cfg.JWT.RefreshTokenTTL,
+		AuditTx:             loginAuditTx,
+		AbuseProtection:     abuseProtection,
+		RateLimitRetryAfter: cfg.RateLimit.RetryAfter,
 	})
 	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
 	sessionSvc := service.NewSessionService(sessionRepo)
@@ -141,6 +185,8 @@ func main() {
 		AccessTokenTTL:      cfg.AccessToken.TTL,
 		RefreshTTL:          cfg.RefreshToken.TTL,
 		AuditTx:             loginAuditTx,
+		AbuseProtection:     abuseProtection,
+		RateLimitRetryAfter: cfg.RateLimit.RetryAfter,
 	})
 	logoutSvc := service.NewLogoutService(service.LogoutServiceDeps{
 		Sessions: sessionSvc,

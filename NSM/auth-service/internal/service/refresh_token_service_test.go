@@ -18,6 +18,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
@@ -26,7 +27,36 @@ import (
 
 const testRefreshAudience = "auth-service"
 
+// newTestRefreshTokenService defaults AbuseProtection to a no-op — see
+// newTestAuthService's identical choice in auth_service_test.go for why: a
+// threshold-enforcing fake shared across every test in this file risks
+// silently interacting with concurrency/reuse-detection tests that call
+// Refresh many times in a row. Rate-limit-specific behavior gets its own
+// dedicated helper, newTestRefreshTokenServiceWithAbuseProtection, below.
 func newTestRefreshTokenService(t *testing.T) (*RefreshTokenService, *mocks.FakeRefreshTokenRepository, *mocks.FakeSessionRepository, *mocks.FakeAuditLogRepository) {
+	t.Helper()
+	svc, refreshTokens, sessionRepo, audit, _ := newRefreshTokenServiceDeps(t, ratelimit.NoopAuthAbuseProtection{})
+	return svc, refreshTokens, sessionRepo, audit
+}
+
+// newTestRefreshTokenServiceWithAbuseProtection wires a real,
+// threshold-enforcing ratelimit.FakeAuthAbuseProtection configured with
+// this milestone's approved refresh policy (IP-only, limit 30) — for
+// tests that specifically exercise rate-limiting behavior.
+func newTestRefreshTokenServiceWithAbuseProtection(t *testing.T) (*RefreshTokenService, *mocks.FakeRefreshTokenRepository, *mocks.FakeSessionRepository, *ratelimit.FakeAuthAbuseProtection) {
+	t.Helper()
+	abuseProtection := ratelimit.NewFakeAuthAbuseProtection(ratelimit.Config{
+		Operations: map[string]ratelimit.OperationPolicy{
+			ratelimit.OperationRefresh: {
+				IP: &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 30, BlockDuration: 15 * time.Minute},
+			},
+		},
+	})
+	svc, refreshTokens, sessionRepo, _, _ := newRefreshTokenServiceDeps(t, abuseProtection)
+	return svc, refreshTokens, sessionRepo, abuseProtection
+}
+
+func newRefreshTokenServiceDeps(t *testing.T, abuseProtection ratelimit.AuthAbuseProtection) (*RefreshTokenService, *mocks.FakeRefreshTokenRepository, *mocks.FakeSessionRepository, *mocks.FakeAuditLogRepository, *security.TokenService) {
 	t.Helper()
 	refreshTokens := mocks.NewFakeRefreshTokenRepository()
 	sessionRepo := mocks.NewFakeSessionRepository()
@@ -50,8 +80,10 @@ func newTestRefreshTokenService(t *testing.T) (*RefreshTokenService, *mocks.Fake
 		AccessTokenTTL:      10 * time.Minute,
 		RefreshTTL:          7 * 24 * time.Hour,
 		AuditTx:             auditTx,
+		AbuseProtection:     abuseProtection,
+		RateLimitRetryAfter: 60 * time.Second,
 	})
-	return svc, refreshTokens, sessionRepo, audit
+	return svc, refreshTokens, sessionRepo, audit, tokens
 }
 
 // seedRefreshToken creates a session and a refresh token belonging to it,

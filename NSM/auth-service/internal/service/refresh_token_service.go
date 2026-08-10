@@ -9,6 +9,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/util"
@@ -49,6 +50,22 @@ type RefreshTokenServiceDeps struct {
 	// transaction). A nil AuditTx skips audit-logging for refresh
 	// entirely, which tests that don't care about it rely on.
 	AuditTx AuditTxFunc
+	// AbuseProtection is the Redis-backed refresh-abuse pre-check and
+	// outcome recorder (Milestone 6C) — required, not optional; see
+	// AuthServiceDeps.AbuseProtection's doc comment for the same "existing
+	// tests supply a fake that allows everything" convention. Refresh's
+	// policy is IP-only (never an account/pair dimension): a refresh token
+	// is already a high-entropy secret, not a guessable credential, and
+	// no account identifier exists until the token resolves anyway. This
+	// complements RefreshTokenService's own existing reuse detection
+	// (RevokeFamily/RevokeSession below) — it never replaces or duplicates
+	// it; reuse detection is still what decides *whether this specific
+	// token* is compromised, this only decides *whether this IP may keep
+	// trying*.
+	AbuseProtection ratelimit.AuthAbuseProtection
+	// RateLimitRetryAfter is the fixed value RateLimitedError carries —
+	// see that type's own doc comment (auth_service.go).
+	RateLimitRetryAfter time.Duration
 }
 
 type RefreshTokenService struct {
@@ -88,6 +105,15 @@ type RefreshResult struct {
 // recorded internally, in the audit entry's Metadata (never the token or
 // its hash) and in a log line.
 func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta LoginMeta) (*RefreshResult, error) {
+	// Redis pre-check — IP-only, before the GetByTokenHash lookup, per
+	// Milestone 6C's approved design. Check never returns an error to
+	// interpret; see AuthService.Login's identical pre-check for the same
+	// reasoning.
+	rateLimitDims := ratelimit.Dimensions{IP: meta.IPAddress}
+	if decision, _ := s.deps.AbuseProtection.Check(ctx, ratelimit.OperationRefresh, rateLimitDims); !decision.Allowed {
+		return nil, RateLimitedError{RetryAfter: s.deps.RateLimitRetryAfter}
+	}
+
 	var current *entity.RefreshToken
 	var refreshErr error
 	var failureReason string
@@ -99,6 +125,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 	if errors.Is(err, entity.ErrNotFound) {
 		failureReason = "not_found"
 		refreshErr = entity.ErrTokenExpired
+		s.recordRefreshFailure(ctx, rateLimitDims, meta)
 		return nil, refreshErr
 	}
 	if err != nil {
@@ -112,7 +139,9 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 		// the whole family (no further refresh is possible on this chain)
 		// and the session itself (so a future access-token-validating
 		// caller sees it as dead too), then reject exactly like any other
-		// failure.
+		// failure. This reuse-detection logic is unchanged from Milestone
+		// 5B — the abuse-protection call below only adds volume-based IP
+		// throttling on top of it, never replacing or duplicating it.
 		if err := s.deps.RefreshTokens.RevokeFamily(ctx, current.FamilyID, entity.RevocationReuseDetected); err != nil {
 			logging.FromContext(ctx).Error("failed to revoke token family after reuse detection", zap.Error(err))
 		}
@@ -123,6 +152,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 			zap.String("user_id", current.UserID), zap.String("family_id", current.FamilyID))
 		failureReason = "reuse_detected"
 		refreshErr = entity.ErrTokenReuseDetected
+		s.recordRefreshFailure(ctx, rateLimitDims, meta)
 		return nil, refreshErr
 	}
 
@@ -130,6 +160,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 	if current.RevokedAt != nil || current.IsExpired(now) {
 		failureReason = "token_revoked_or_expired"
 		refreshErr = entity.ErrTokenExpired
+		s.recordRefreshFailure(ctx, rateLimitDims, meta)
 		return nil, refreshErr
 	}
 
@@ -141,6 +172,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 			zap.String("user_id", current.UserID), zap.Error(err))
 		failureReason = "session_invalid"
 		refreshErr = entity.ErrTokenExpired
+		s.recordRefreshFailure(ctx, rateLimitDims, meta)
 		return nil, refreshErr
 	}
 
@@ -229,5 +261,39 @@ func (s *RefreshTokenService) recordRefreshAudit(ctx context.Context, current *e
 	})
 	if err != nil {
 		logging.FromContext(ctx).Error("failed to record refresh audit event", zap.Error(err))
+	}
+}
+
+// recordRefreshFailure best-effort records this invalid/expired/revoked/
+// replayed refresh attempt in the abuse-protection layer and, only the
+// moment the IP dimension newly crosses its threshold, writes one bounded
+// auth.refresh_abuse_detected audit_logs event — distinct from
+// recordRefreshAudit's own per-attempt "auth.token_refresh" entry above:
+// that one is a per-token record of what happened to this specific
+// token; this one is a volume signal about this IP, and only fires once
+// per block episode, not once per attempt.
+func (s *RefreshTokenService) recordRefreshFailure(ctx context.Context, dims ratelimit.Dimensions, meta LoginMeta) {
+	blocked, err := s.deps.AbuseProtection.RecordFailure(ctx, ratelimit.OperationRefresh, dims)
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record refresh failure in abuse-protection layer", zap.Error(err))
+		return
+	}
+	if !blocked {
+		return
+	}
+	logging.FromContext(ctx).Warn("refresh-token abuse rate limit exceeded", zap.String("operation", ratelimit.OperationRefresh))
+	if s.deps.AuditTx == nil {
+		return
+	}
+	audit := &entity.AuditLogEntry{
+		ActorType: entity.AuditActorSystem,
+		Action:    "auth.refresh_abuse_detected",
+		Result:    entity.AuditResultDenied,
+		IPAddress: strPtr(meta.IPAddress),
+	}
+	if err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
+		return repo.Append(ctx, audit)
+	}); err != nil {
+		logging.FromContext(ctx).Error("failed to record refresh-abuse audit event", zap.Error(err))
 	}
 }

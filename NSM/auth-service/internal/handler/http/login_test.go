@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acme/auth-service/internal/entity"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
@@ -21,7 +22,9 @@ import (
 // internal/service/auth_service_test.go uses — see that file's
 // newTestAuthService for why the audit fake is a plain pass-through rather
 // than register_test.go's newTestUserHandler's transactional
-// FakeRegistrationTx.
+// FakeRegistrationTx, and for why AbuseProtection is a no-op here (this
+// file isn't testing rate-limiting — see rate_limit_handler_test.go for
+// the tests that specifically are).
 func newTestAuthHandler(t *testing.T) (*authHandler, *mocks.FakeUserRepository) {
 	t.Helper()
 	users := mocks.NewFakeUserRepository()
@@ -37,14 +40,15 @@ func newTestAuthHandler(t *testing.T) (*authHandler, *mocks.FakeUserRepository) 
 	})
 
 	svc := service.NewAuthService(service.AuthServiceDeps{
-		Users:         users,
-		Sessions:      sessions,
-		RefreshTokens: refreshTokens,
-		LoginHistory:  loginHistory,
-		Tokens:        util.NewJWTSigner("test-signing-key-at-least-32-bytes!", 15*time.Minute),
-		Passwords:     passwords,
-		RefreshTTL:    30 * 24 * time.Hour,
-		AuditTx:       auditTx,
+		Users:           users,
+		Sessions:        sessions,
+		RefreshTokens:   refreshTokens,
+		LoginHistory:    loginHistory,
+		Tokens:          util.NewJWTSigner("test-signing-key-at-least-32-bytes!", 15*time.Minute),
+		Passwords:       passwords,
+		RefreshTTL:      30 * 24 * time.Hour,
+		AuditTx:         auditTx,
+		AbuseProtection: ratelimit.NoopAuthAbuseProtection{},
 	})
 	return &authHandler{svc: svc}, users
 }

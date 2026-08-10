@@ -20,6 +20,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # Backs internal/ratelimit's Redis-based authentication abuse protection
+  # (Milestone 6C) — REDIS_ADDR=localhost:6379 from the host, or
+  # redis:6379 from inside this compose network, is what
+  # test/integration/ratelimit_test.go and the app service below expect.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   migrate:
     image: migrate/migrate:v4.17.1
     volumes:
@@ -46,10 +60,13 @@ services:
       AUTH_ENVIRONMENT: "development"
       AUTH_DATABASE_URL: "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable"
       AUTH_JWT_SIGNING_KEY: "local-development-signing-key-not-for-prod-use"
+      AUTH_REDIS_ADDR: "redis:6379"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

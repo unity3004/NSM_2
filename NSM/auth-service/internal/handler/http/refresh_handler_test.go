@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/acme/auth-service/internal/entity"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
@@ -58,6 +59,7 @@ func newTestRefreshHandler(t *testing.T) (*refreshHandler, *mocks.FakeRefreshTok
 		AccessTokenTTL:      10 * time.Minute,
 		RefreshTTL:          7 * 24 * time.Hour,
 		AuditTx:             auditTx,
+		AbuseProtection:     ratelimit.NoopAuthAbuseProtection{},
 	})
 	return &refreshHandler{svc: svc}, refreshTokens, sessionRepo
 }

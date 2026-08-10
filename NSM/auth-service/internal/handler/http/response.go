@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"go.uber.org/zap"
 
@@ -84,10 +85,20 @@ func writeValidationError(w http.ResponseWriter, r *http.Request, err error) {
 // disagree about what ErrAccountLocked means on the wire.
 func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	var locked service.AccountLockedError
+	var limited service.RateLimitedError
 	switch {
 	case errors.As(err, &locked):
 		writeErrorEnvelope(w, r, http.StatusLocked, dto.CodeAccountLocked,
 			"Account is locked until "+locked.Until.Format(http.TimeFormat)+".", nil)
+	case errors.As(err, &limited):
+		// Milestone 6C: Retry-After is a fixed, configured value — never
+		// derived from which dimension actually blocked the request or
+		// how much of its real window remains, so the header itself
+		// carries no information beyond "try again later." No detail
+		// about IP/account/pair, Redis, or internal counters reaches the
+		// client either way.
+		w.Header().Set("Retry-After", strconv.Itoa(int(limited.RetryAfter.Seconds())))
+		writeErrorEnvelope(w, r, http.StatusTooManyRequests, dto.CodeRateLimited, "Too many attempts. Please try again later.", nil)
 	case errors.Is(err, service.ErrMissingSessionIdentity):
 		// The authenticated identity had no session ID to act on — an
 		// authentication/session design error (Milestone 6B requirement

@@ -13,6 +13,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
@@ -199,6 +200,7 @@ func TestLogoutService_Logout_PreventsSubsequentRefresh(t *testing.T) {
 		AccessTokenTTL:      10 * time.Minute,
 		RefreshTTL:          7 * 24 * time.Hour,
 		AuditTx:             auditTx,
+		AbuseProtection:     ratelimit.NoopAuthAbuseProtection{},
 	})
 
 	// Sanity: the refresh token works before logout.

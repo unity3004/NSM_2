@@ -31,6 +31,7 @@ type Config struct {
 	Environment  string             `mapstructure:"environment"`
 	Server       ServerConfig       `mapstructure:"server"`
 	Database     DatabaseConfig     `mapstructure:"database"`
+	Redis        RedisConfig        `mapstructure:"redis"`
 	JWT          JWTConfig          `mapstructure:"jwt"`
 	AccessToken  AccessTokenConfig  `mapstructure:"access_token"`
 	RefreshToken RefreshTokenConfig `mapstructure:"refresh_token"`
@@ -79,6 +80,24 @@ func (d DatabaseConfig) DSN() string {
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		d.User, d.Password, d.Host, d.Port, d.Name, d.SSLMode)
+}
+
+// RedisConfig describes the connection internal/redis.NewClient opens —
+// backing internal/ratelimit's authentication abuse protection (Milestone
+// 6C). Host/Port always have working local-dev defaults (see setDefaults);
+// only Password has none, the same secret-gets-no-default rule
+// database.password and jwt.signing_key already follow — but unlike that
+// database password, an empty Redis password is common and legitimate
+// (a private-network Redis with no auth configured), so Validate does not
+// require it to be set.
+type RedisConfig struct {
+	Addr         string        `mapstructure:"addr"`
+	Password     string        `mapstructure:"password"`
+	DB           int           `mapstructure:"db"`
+	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	PoolSize     int           `mapstructure:"pool_size"`
 }
 
 type JWTConfig struct {
@@ -138,8 +157,58 @@ type RefreshTokenConfig struct {
 	TTL time.Duration `mapstructure:"ttl"`
 }
 
+// RateLimitConfig configures internal/ratelimit's Redis-backed
+// authentication abuse protection (Milestone 6C). It replaces the
+// Sprint-1 RateLimitConfig{LoginPerMinute}, which nothing in this codebase
+// ever read — dead config, not a value with existing behavior to
+// preserve.
 type RateLimitConfig struct {
-	LoginPerMinute int `mapstructure:"login_per_minute"`
+	// Enabled is a master switch — false skips construction of the Redis
+	// client and abuse-protection component entirely (see
+	// cmd/server/main.go), for a deployment that isn't ready to run Redis
+	// yet. Defaults to true: for an authentication service, brute-force
+	// protection is a security control, not an opt-in extra.
+	Enabled bool `mapstructure:"enabled"`
+	// FailClosed selects the posture when Redis is unreachable during the
+	// pre-check: true rejects the authentication operation (a Redis
+	// outage becomes a temporary authentication outage); false allows it
+	// through unprotected (brute-force protection lapses, availability
+	// doesn't). The Milestone 6C design review's explicit choice for an
+	// enterprise secrets-management product is fail-closed. This applies
+	// only to the pre-check — outcome recording (RecordFailure/
+	// RecordSuccess) is always best-effort regardless of this setting; see
+	// internal/ratelimit.AuthAbuseProtection's doc comment for why.
+	FailClosed bool `mapstructure:"fail_closed"`
+	// RetryAfter is the fixed value returned in every 429 response's
+	// Retry-After header — deliberately not derived from any dimension's
+	// actual remaining block time, so the header itself never reveals
+	// which dimension triggered or how close to expiry a block is.
+	RetryAfter time.Duration          `mapstructure:"retry_after"`
+	Login      LoginRateLimitConfig   `mapstructure:"login"`
+	Refresh    RefreshRateLimitConfig `mapstructure:"refresh"`
+}
+
+// LoginRateLimitConfig holds POST /auth/login's three dimensions — IP,
+// account, and their pairing — each with its own detection window,
+// failure threshold, and this operation's shared block duration.
+type LoginRateLimitConfig struct {
+	IPWindow      time.Duration `mapstructure:"ip_window"`
+	IPLimit       int64         `mapstructure:"ip_limit"`
+	AccountWindow time.Duration `mapstructure:"account_window"`
+	AccountLimit  int64         `mapstructure:"account_limit"`
+	PairWindow    time.Duration `mapstructure:"pair_window"`
+	PairLimit     int64         `mapstructure:"pair_limit"`
+	BlockDuration time.Duration `mapstructure:"block_duration"`
+}
+
+// RefreshRateLimitConfig holds POST /auth/refresh's one dimension — IP
+// only, per the Milestone 6C design review: a refresh token is already a
+// high-entropy secret, not a guessable credential, so there is no account
+// dimension to rate-limit before the token has even resolved to a user.
+type RefreshRateLimitConfig struct {
+	IPWindow      time.Duration `mapstructure:"ip_window"`
+	IPLimit       int64         `mapstructure:"ip_limit"`
+	BlockDuration time.Duration `mapstructure:"block_duration"`
 }
 
 type LogConfig struct {
@@ -202,6 +271,14 @@ func Load() (*Config, error) {
 	if err := v.BindEnv("access_token.private_key_path"); err != nil {
 		return nil, fmt.Errorf("config: bind access_token.private_key_path: %w", err)
 	}
+	// redis.password has no default either — unlike database.password,
+	// Validate doesn't require it to be set (see RedisConfig's doc
+	// comment), but AutomaticEnv still needs the explicit bind to find
+	// AUTH_REDIS_PASSWORD at all, the same gotcha as every other no-default
+	// field above.
+	if err := v.BindEnv("redis.password"); err != nil {
+		return nil, fmt.Errorf("config: bind redis.password: %w", err)
+	}
 
 	var cfg Config
 	decodeHook := mapstructure.ComposeDecodeHookFunc(
@@ -261,7 +338,32 @@ func setDefaults(v *viper.Viper) {
 	// separation AccessTokenConfig already keeps from JWTConfig.
 	v.SetDefault("refresh_token.ttl", 7*24*time.Hour)
 
-	v.SetDefault("rate_limit.login_per_minute", 5)
+	v.SetDefault("redis.addr", "localhost:6379")
+	v.SetDefault("redis.db", 0)
+	v.SetDefault("redis.dial_timeout", 5*time.Second)
+	v.SetDefault("redis.read_timeout", 3*time.Second)
+	v.SetDefault("redis.write_timeout", 3*time.Second)
+	v.SetDefault("redis.pool_size", 10)
+
+	// Milestone 6C: an enterprise secrets-management product treats
+	// authentication abuse protection as a security control, not an
+	// optimization — enabled and fail-closed by default (see
+	// RateLimitConfig's own doc comment for the fail-closed tradeoff).
+	v.SetDefault("rate_limit.enabled", true)
+	v.SetDefault("rate_limit.fail_closed", true)
+	v.SetDefault("rate_limit.retry_after", 60*time.Second)
+
+	v.SetDefault("rate_limit.login.ip_window", 15*time.Minute)
+	v.SetDefault("rate_limit.login.ip_limit", 20)
+	v.SetDefault("rate_limit.login.account_window", 15*time.Minute)
+	v.SetDefault("rate_limit.login.account_limit", 5)
+	v.SetDefault("rate_limit.login.pair_window", 15*time.Minute)
+	v.SetDefault("rate_limit.login.pair_limit", 5)
+	v.SetDefault("rate_limit.login.block_duration", 15*time.Minute)
+
+	v.SetDefault("rate_limit.refresh.ip_window", 15*time.Minute)
+	v.SetDefault("rate_limit.refresh.ip_limit", 30)
+	v.SetDefault("rate_limit.refresh.block_duration", 15*time.Minute)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
@@ -330,8 +432,34 @@ func (c Config) Validate() error {
 		errs = append(errs, "refresh_token.ttl must be positive")
 	}
 
-	if c.RateLimit.LoginPerMinute <= 0 {
-		errs = append(errs, "rate_limit.login_per_minute must be positive")
+	if c.RateLimit.Enabled {
+		if c.RateLimit.RetryAfter <= 0 {
+			errs = append(errs, "rate_limit.retry_after must be positive")
+		}
+		type namedLimit struct {
+			field string
+			d     time.Duration
+			n     int64
+		}
+		for _, l := range []namedLimit{
+			{"rate_limit.login.ip", c.RateLimit.Login.IPWindow, c.RateLimit.Login.IPLimit},
+			{"rate_limit.login.account", c.RateLimit.Login.AccountWindow, c.RateLimit.Login.AccountLimit},
+			{"rate_limit.login.pair", c.RateLimit.Login.PairWindow, c.RateLimit.Login.PairLimit},
+			{"rate_limit.refresh.ip", c.RateLimit.Refresh.IPWindow, c.RateLimit.Refresh.IPLimit},
+		} {
+			if l.d <= 0 {
+				errs = append(errs, l.field+"_window must be positive")
+			}
+			if l.n <= 0 {
+				errs = append(errs, l.field+"_limit must be positive")
+			}
+		}
+		if c.RateLimit.Login.BlockDuration <= 0 {
+			errs = append(errs, "rate_limit.login.block_duration must be positive")
+		}
+		if c.RateLimit.Refresh.BlockDuration <= 0 {
+			errs = append(errs, "rate_limit.refresh.block_duration must be positive")
+		}
 	}
 
 	if len(errs) > 0 {

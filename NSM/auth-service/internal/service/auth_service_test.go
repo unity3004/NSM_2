@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acme/auth-service/internal/entity"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
@@ -57,8 +58,60 @@ func newTestAuthService(t *testing.T) (*AuthService, *mocks.FakeUserRepository, 
 		Passwords:     security.NewPasswordService(testPasswordParams),
 		RefreshTTL:    30 * 24 * time.Hour,
 		AuditTx:       auditTx,
+		// Milestone 6C: a no-op here, deliberately, not a
+		// threshold-enforcing fake — TestLogin_LocksAfterMaxAttempts below
+		// drives Login to the exact same failure count (5) this milestone's
+		// own approved account-dimension threshold uses, and asserting on
+		// the *Postgres* lockout's behavior specifically requires the new
+		// Redis-layer pre-check to never itself intervene here. Rate-limit
+		// behavior gets its own dedicated tests against
+		// newTestAuthServiceWithAbuseProtection below, not this shared
+		// helper every other test in this file also depends on.
+		AbuseProtection: ratelimit.NoopAuthAbuseProtection{},
 	})
 	return svc, users, refreshTokens, loginHistory, audit
+}
+
+// newTestAuthServiceWithAbuseProtection is newTestAuthService plus a real,
+// threshold-enforcing ratelimit.FakeAuthAbuseProtection configured with
+// this milestone's approved policy — for the tests that specifically
+// exercise rate-limiting behavior, kept separate from newTestAuthService
+// so every other test in this file keeps the no-op default (see that
+// function's comment on why sharing one fake would silently interact with
+// the existing Postgres lockout threshold).
+func newTestAuthServiceWithAbuseProtection(t *testing.T) (*AuthService, *mocks.FakeUserRepository, *ratelimit.FakeAuthAbuseProtection) {
+	t.Helper()
+	users := mocks.NewFakeUserRepository()
+	sessions := mocks.NewFakeSessionRepository()
+	refreshTokens := mocks.NewFakeRefreshTokenRepository()
+	loginHistory := mocks.NewFakeLoginHistoryRepository()
+	audit := mocks.NewFakeAuditLogRepository()
+	auditTx := func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return fn(audit)
+	}
+	abuseProtection := ratelimit.NewFakeAuthAbuseProtection(ratelimit.Config{
+		Operations: map[string]ratelimit.OperationPolicy{
+			ratelimit.OperationLogin: {
+				IP:      &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 20, BlockDuration: 15 * time.Minute},
+				Account: &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 5, BlockDuration: 15 * time.Minute},
+				Pair:    &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 5, BlockDuration: 15 * time.Minute},
+			},
+		},
+	})
+
+	svc := NewAuthService(AuthServiceDeps{
+		Users:               users,
+		Sessions:            sessions,
+		RefreshTokens:       refreshTokens,
+		LoginHistory:        loginHistory,
+		Tokens:              util.NewJWTSigner("test-signing-key-at-least-32-bytes!", 15*time.Minute),
+		Passwords:           security.NewPasswordService(testPasswordParams),
+		RefreshTTL:          30 * 24 * time.Hour,
+		AuditTx:             auditTx,
+		AbuseProtection:     abuseProtection,
+		RateLimitRetryAfter: 60 * time.Second,
+	})
+	return svc, users, abuseProtection
 }
 
 func seedUser(t *testing.T, users *mocks.FakeUserRepository, email, password string) *entity.User {

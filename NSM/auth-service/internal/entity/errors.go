@@ -20,4 +20,5 @@ var (
 	ErrOwnerConflict      = errors.New("exactly one owner must be set")
 	ErrSessionRevoked     = errors.New("session has been revoked")
 	ErrSessionExpired     = errors.New("session has expired")
+	ErrRateLimited        = errors.New("too many attempts")
 )

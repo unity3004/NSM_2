@@ -15,6 +15,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/util"
@@ -32,6 +33,15 @@ type AccountLockedError struct{ Until time.Time }
 
 func (e AccountLockedError) Error() string { return "account is locked" }
 func (e AccountLockedError) Unwrap() error { return entity.ErrAccountLocked }
+
+// RateLimitedError carries the fixed, configured Retry-After value the
+// handler puts on the 429 response — never a value derived from which
+// dimension actually blocked the request or how much of its window
+// remains (Milestone 6C: exposing that would itself leak internal state).
+type RateLimitedError struct{ RetryAfter time.Duration }
+
+func (e RateLimitedError) Error() string { return "too many authentication attempts" }
+func (e RateLimitedError) Unwrap() error { return entity.ErrRateLimited }
 
 // LoginMeta is the request metadata that doesn't belong in dto.LoginRequest
 // (it's read from headers/connection info, not the JSON body) but that
@@ -68,6 +78,21 @@ type AuthServiceDeps struct {
 	// AuditTxFunc. A nil AuditTx skips audit-logging for login entirely,
 	// which existing tests that don't care about it rely on.
 	AuditTx AuditTxFunc
+	// AbuseProtection is the Redis-backed brute-force/credential-stuffing
+	// pre-check and outcome recorder (Milestone 6C) — required, not
+	// optional: every existing test that constructs AuthServiceDeps now
+	// supplies a ratelimit.FakeAuthAbuseProtection that allows everything
+	// by default, so tests that don't care about rate limiting are
+	// unaffected. See ratelimit.AuthAbuseProtection's own doc comment for
+	// the exact division of responsibility between this dependency and
+	// Login's own existing PostgreSQL-backed lockout, which is completely
+	// unchanged by this milestone — this is a new, additional layer in
+	// front of it, never a replacement.
+	AbuseProtection ratelimit.AuthAbuseProtection
+	// RateLimitRetryAfter is the fixed value RateLimitedError carries —
+	// see that type's own doc comment on why it's fixed rather than
+	// derived from internal rate-limit state.
+	RateLimitRetryAfter time.Duration
 }
 
 type AuthService struct {
@@ -98,6 +123,22 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	// registration for "marcus.webb@acme.com" created.
 	email = util.NormalizeEmail(email)
 
+	// Redis pre-check — before any PostgreSQL work or Argon2id
+	// verification, per Milestone 6C's approved architecture. A blocked
+	// pre-check never gets far enough to be "an evaluated login attempt"
+	// in login_history's existing sense (no user lookup happened at all),
+	// so no login_history row is written for it; the bounded,
+	// transition-only auth.rate_limited audit event (written inside
+	// RecordFailure's caller, not here) is where this is recorded
+	// instead. Check never returns an error to interpret — Redis-failure
+	// handling is entirely internal to it, resolved per the configured
+	// fail_closed posture; see ratelimit.AuthAbuseProtection's doc
+	// comment.
+	rateLimitDims := ratelimit.Dimensions{IP: meta.IPAddress, Account: email}
+	if decision, _ := s.deps.AbuseProtection.Check(ctx, ratelimit.OperationLogin, rateLimitDims); !decision.Allowed {
+		return nil, RateLimitedError{RetryAfter: s.deps.RateLimitRetryAfter}
+	}
+
 	now := time.Now()
 	entry := &entity.LoginHistoryEntry{
 		OrganizationID:      &organizationID,
@@ -115,6 +156,7 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	if errors.Is(err, entity.ErrNotFound) {
 		entry.Status = entity.LoginFailureUnknownIdentity
 		loginErr = entity.ErrInvalidCredentials
+		s.recordLoginFailure(ctx, rateLimitDims, meta)
 		return nil, loginErr
 	}
 	if err != nil {
@@ -131,6 +173,7 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	if user.Status == entity.UserStatusDisabled {
 		entry.Status = entity.LoginFailureDisabled
 		loginErr = entity.ErrAccountDisabled
+		s.recordLoginFailure(ctx, rateLimitDims, meta)
 		return nil, loginErr
 	}
 	if user.IsLocked(now) {
@@ -158,6 +201,12 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 		}
 	}
 	if !passwordOK {
+		// Redis-side outcome recording — independent of, and in addition
+		// to, the existing PostgreSQL IncrementFailedLoginAttempts/Lock
+		// calls just below: two separate, deliberately non-duplicative
+		// layers (see AuthServiceDeps.AbuseProtection's doc comment).
+		s.recordLoginFailure(ctx, rateLimitDims, meta)
+
 		attempts, incErr := s.deps.Users.IncrementFailedLoginAttempts(ctx, user.ID)
 		if incErr == nil && attempts >= maxFailedLoginAttempts {
 			until := now.Add(lockoutDuration)
@@ -188,6 +237,13 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 	}
 
 	_ = s.deps.Users.ResetFailedLoginAttempts(ctx, user.ID)
+	// Resets the account and pair dimensions only, never IP — see
+	// AuthAbuseProtection.RecordSuccess's own doc comment. Best-effort: a
+	// Redis problem here must not change a login that has already
+	// succeeded.
+	if err := s.deps.AbuseProtection.RecordSuccess(ctx, ratelimit.OperationLogin, rateLimitDims); err != nil {
+		logging.FromContext(ctx).Error("failed to reset abuse-protection counters after successful login", zap.Error(err))
+	}
 
 	session, result, err := s.issueSession(ctx, user, meta)
 	if err != nil {
@@ -241,6 +297,52 @@ func (s *AuthService) recordLoginAudit(ctx context.Context, organizationID strin
 	if err != nil {
 		logging.FromContext(ctx).Error("failed to record login audit event",
 			zap.String("organization_id", organizationID), zap.Error(err))
+	}
+}
+
+// recordLoginFailure best-effort records a failed login attempt in the
+// abuse-protection layer and, only the moment a dimension newly crosses
+// its threshold, writes one bounded audit_logs event — never one per
+// repeated attempt against a dimension that's already blocked, which is
+// what keeps this safe against an attacker who keeps hammering an
+// already-blocked account or IP. A Redis problem here is logged and
+// swallowed: by this point the actual login outcome has already been
+// decided, and a bookkeeping failure must not change it (Milestone 6C's
+// explicit outcome-recording-is-always-best-effort rule).
+func (s *AuthService) recordLoginFailure(ctx context.Context, dims ratelimit.Dimensions, meta LoginMeta) {
+	blocked, err := s.deps.AbuseProtection.RecordFailure(ctx, ratelimit.OperationLogin, dims)
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record login failure in abuse-protection layer", zap.Error(err))
+		return
+	}
+	if blocked {
+		logging.FromContext(ctx).Warn("authentication rate limit exceeded", zap.String("operation", ratelimit.OperationLogin))
+		s.recordRateLimitAudit(ctx, ratelimit.OperationLogin, meta)
+	}
+}
+
+// recordRateLimitAudit best-effort appends one audit_logs row for a
+// rate-limit block transition — Action "auth.rate_limited", the existing
+// lowercase-dot action-naming convention this codebase already uses
+// throughout (user.login, auth.token_refresh, auth.logout), never the
+// identifier that tripped the threshold, only IP metadata the same way
+// every other audit write in this file already includes it.
+func (s *AuthService) recordRateLimitAudit(ctx context.Context, operation string, meta LoginMeta) {
+	if s.deps.AuditTx == nil {
+		return
+	}
+	audit := &entity.AuditLogEntry{
+		ActorType: entity.AuditActorSystem,
+		Action:    "auth.rate_limited",
+		Result:    entity.AuditResultDenied,
+		IPAddress: strPtr(meta.IPAddress),
+		Metadata:  map[string]any{"operation": operation},
+	}
+	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
+		return repo.Append(ctx, audit)
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record rate-limit audit event", zap.Error(err))
 	}
 }
 
