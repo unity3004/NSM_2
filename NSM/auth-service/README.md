@@ -19,6 +19,40 @@ service/handler/postgres — see "Extending the slice" below.
 go build ./... && go vet ./... && go test ./...   # all pass, right now
 ```
 
+## Running locally
+
+`docker compose up` (from `docker/`) is the whole setup — Postgres, Redis,
+migrations, and the app container are wired together with the right
+`depends_on`/healthcheck ordering (see `docker/docker-compose.yml`). The
+one thing it needs that Docker can't generate on its own the first time is
+covered automatically:
+
+1. `docker compose -f docker/docker-compose.yml up --build` (or
+   `make docker-up`) — the one-shot `keygen` service runs
+   `go run ./cmd/devkeygen` for you, writing a disposable, development-only
+   Ed25519 signing key to git-ignored `docker/.dev-secrets/` before `app`
+   starts. Nothing to generate by hand.
+2. `app` mounts that file read-only and points
+   `AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH` at it (see `AUTH_ACCESS_TOKEN_KEY_ID`/
+   `AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH` in `docker-compose.yml`) — `Config.Validate()`
+   passes, and the server starts listening on `:8080`.
+3. `POST http://localhost:8080/v1/auth/login` with a registered user's
+   credentials returns a signed access token; any endpoint guarded by
+   `middleware.Authenticate` (e.g. `POST /v1/auth/logout/current`) accepts
+   it back — the key that signed it is the same one `LoadSigningKeySet`
+   loaded in step 2.
+
+Running `cmd/server` directly instead of through Compose needs the same
+key by hand: `go run ./cmd/devkeygen` writes the identical file, then copy
+`configs/.env.example` to `configs/.env` (or export the two
+`AUTH_ACCESS_TOKEN_*` variables it documents) before `go run ./cmd/server`.
+
+The key this produces is Ed25519, PKCS#8 PEM, generated fresh by
+`crypto/rand` — **never a production key, never committed** (`docker/.dev-secrets/`
+is in `.gitignore`), and never logged (`internal/config/log_value.go`
+redacts `access_token.private_key_pem`; `private_key_path` is just a
+filesystem path, not key material).
+
 ## Why Clean Architecture, and what that means here
 
 The rule that matters is: **dependencies point inward, and inner layers
