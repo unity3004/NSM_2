@@ -411,3 +411,181 @@ func TestLogin_RecordSuccessError_LoginStillSucceeds(t *testing.T) {
 		t.Errorf("logged error field = %v, want %q", got, injected.Error())
 	}
 }
+
+// --- refresh: fault injection for abuse-protection outcome recording ---
+//
+// RefreshTokenService.Refresh treats AbuseProtection the same way
+// AuthService.Login does — Check's own error is resolved internally per
+// Config.FailClosed and never reaches Refresh as a Go error at all (see
+// fake_limiter.go's FailNextCheck doc comment; Refresh discards Check's
+// error return exactly like Login does), and RecordFailure is always
+// best-effort: logged and swallowed on error, never surfaced to the
+// caller (recordRefreshFailure's own doc comment). Unlike Login, a
+// successful refresh never calls RecordSuccess at all — Refresh's policy
+// is IP-only, and RecordSuccess always skips the IP dimension (see
+// AuthAbuseProtection.RecordSuccess's doc comment), so there is nothing
+// for it to reset. These tests prove that existing, unmodified policy
+// holds when the abuse-protection layer itself errors — no new policy
+// invented.
+
+// newTestRefreshTokenServiceForFaultInjection is
+// newTestRefreshTokenServiceWithAbuseProtection plus the two things these
+// tests specifically need: an explicit FailClosed posture, and a logger
+// (via context, the same way RefreshTokenService actually reads it — see
+// logging.FromContext) the test can inspect with zaptest/observer.
+func newTestRefreshTokenServiceForFaultInjection(t *testing.T, failClosed bool) (svc *RefreshTokenService, refreshTokens *mocks.FakeRefreshTokenRepository, sessionRepo *mocks.FakeSessionRepository, abuseProtection *ratelimit.FakeAuthAbuseProtection, audit *mocks.FakeAuditLogRepository, ctx context.Context, logs *observer.ObservedLogs) {
+	t.Helper()
+	abuseProtection = ratelimit.NewFakeAuthAbuseProtection(ratelimit.Config{
+		FailClosed: failClosed,
+		Operations: map[string]ratelimit.OperationPolicy{
+			ratelimit.OperationRefresh: {
+				IP: &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 30, BlockDuration: 15 * time.Minute},
+			},
+		},
+	})
+	svc, refreshTokens, sessionRepo, audit, _ = newRefreshTokenServiceDeps(t, abuseProtection)
+	core, observedLogs := observer.New(zapcore.DebugLevel)
+	logs = observedLogs
+	ctx = logging.WithContext(t.Context(), zap.New(core))
+	return svc, refreshTokens, sessionRepo, abuseProtection, audit, ctx, logs
+}
+
+// A: a Check failure follows the existing, already-configured
+// fail-open/fail-closed posture — proven at both settings.
+
+func TestRefresh_AbuseProtectionCheckFailure_FailClosed(t *testing.T) {
+	svc, refreshTokens, sessionRepo, abuseProtection, _, ctx, _ := newTestRefreshTokenServiceForFaultInjection(t, true)
+	raw, _ := seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))
+	abuseProtection.FailNextCheck = errors.New("redis: connection refused")
+
+	_, err := svc.Refresh(ctx, raw, LoginMeta{IPAddress: "203.0.113.1"})
+	var limited RateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("Refresh() with Check failing and FailClosed=true, error = %v, want RateLimitedError", err)
+	}
+}
+
+func TestRefresh_AbuseProtectionCheckFailure_FailOpen(t *testing.T) {
+	svc, refreshTokens, sessionRepo, abuseProtection, _, ctx, _ := newTestRefreshTokenServiceForFaultInjection(t, false)
+	raw, _ := seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))
+	abuseProtection.FailNextCheck = errors.New("redis: connection refused")
+
+	// A genuinely valid refresh token must still succeed: FailClosed=false
+	// means a Check that can't reach Redis resolves to "allowed".
+	if _, err := svc.Refresh(ctx, raw, LoginMeta{IPAddress: "203.0.113.1"}); err != nil {
+		t.Fatalf("Refresh() with Check failing and FailClosed=false, error = %v, want nil", err)
+	}
+}
+
+// B, C, D, E: a RecordFailure failure must not panic, must not leak the
+// underlying Redis error to the client, must leave the response and the
+// per-attempt auth.token_refresh audit write exactly as they already
+// behave without any Redis problem, and the logging/audit footprint it
+// leaves must stay bounded — one existing Error log line (with the error
+// actually observed, not silently swallowed) and no
+// auth.refresh_abuse_detected audit event, since recordRefreshFailure
+// returns before ever checking the blocked flag once RecordFailure itself
+// errors.
+func TestRefresh_RecordFailureError_BoundedAndNotLeaked(t *testing.T) {
+	svc, _, _, abuseProtection, audit, ctx, logs := newTestRefreshTokenServiceForFaultInjection(t, false)
+	injected := errors.New("redis: connection reset by peer")
+	abuseProtection.FailNextRecordFailure = injected
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Refresh() panicked: %v", r) // B
+			}
+		}()
+		_, err = svc.Refresh(ctx, "not-a-real-token", LoginMeta{IPAddress: "203.0.113.1"})
+	}()
+
+	// C: the client-visible error is still the existing generic
+	// entity.ErrTokenExpired — never the injected error, never a string
+	// containing it.
+	if !errors.Is(err, entity.ErrTokenExpired) {
+		t.Fatalf("Refresh() error = %v, want entity.ErrTokenExpired", err)
+	}
+	if strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("Refresh() error = %q leaks the underlying abuse-protection error %q", err.Error(), injected.Error())
+	}
+
+	// D: the per-attempt auth.token_refresh audit write is unaffected — it
+	// is written unconditionally by the deferred recordRefreshAudit call,
+	// independent of recordRefreshFailure's own outcome.
+	foundAttemptAudit := false
+	for _, entry := range audit.Entries {
+		if entry.Action == "auth.token_refresh" {
+			foundAttemptAudit = true
+			if entry.Result != entity.AuditResultFailure {
+				t.Errorf("auth.token_refresh Result = %q, want %q", entry.Result, entity.AuditResultFailure)
+			}
+		}
+		if entry.Action == "auth.refresh_abuse_detected" {
+			t.Errorf("unexpected auth.refresh_abuse_detected audit event written after a RecordFailure error: %+v", entry)
+		}
+	}
+	if !foundAttemptAudit {
+		t.Error("expected one auth.token_refresh audit entry regardless of the abuse-protection layer's own error")
+	}
+
+	// E: exactly the one existing Error log line, with the error actually
+	// observed.
+	failureLogs := logs.FilterMessage("failed to record refresh failure in abuse-protection layer").All()
+	if len(failureLogs) != 1 {
+		t.Fatalf(`"failed to record refresh failure..." log entries = %d, want exactly 1`, len(failureLogs))
+	}
+	if got := failureLogs[0].ContextMap()["error"]; got != injected.Error() {
+		t.Errorf("logged error field = %v, want %q", got, injected.Error())
+	}
+}
+
+// D, concretely: reuse detection's actual compromise response (family-wide
+// revocation) must still happen even when the abuse-protection layer's
+// own RecordFailure call — made after the revocation, per
+// refresh_token_service.go — errors. A RecordFailure failure must never
+// mask or skip the security decision that already happened.
+func TestRefresh_RecordFailureError_ReuseDetectionStillRevokesFamily(t *testing.T) {
+	svc, refreshTokens, sessionRepo, abuseProtection, _, ctx, _ := newTestRefreshTokenServiceForFaultInjection(t, false)
+	rt1Raw, _ := seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))
+
+	rt2, err := svc.Refresh(ctx, rt1Raw, LoginMeta{IPAddress: "203.0.113.1"})
+	if err != nil {
+		t.Fatalf("Refresh() (RT1->RT2) error = %v", err)
+	}
+
+	abuseProtection.FailNextRecordFailure = errors.New("redis: connection reset by peer")
+
+	// Presenting RT1 again — the reuse — while RecordFailure itself fails.
+	if _, err := svc.Refresh(ctx, rt1Raw, LoginMeta{IPAddress: "203.0.113.1"}); !errors.Is(err, entity.ErrTokenReuseDetected) {
+		t.Fatalf("Refresh() reusing RT1, error = %v, want entity.ErrTokenReuseDetected", err)
+	}
+
+	// RT2 — otherwise still perfectly valid — must now be dead too: the
+	// family-wide revocation must not have been skipped just because the
+	// abuse-protection bookkeeping call after it failed.
+	if _, err := svc.Refresh(ctx, rt2.RefreshToken, LoginMeta{IPAddress: "203.0.113.1"}); err == nil {
+		t.Error("Refresh() with RT2 succeeded after reuse detection; want an error — family-wide revocation must not be skipped just because RecordFailure errored")
+	}
+}
+
+// F, for Refresh: unlike Login (which resets the account+pair dimensions
+// on success), a successful refresh must never call RecordSuccess at
+// all — Refresh's policy is IP-only, and RecordSuccess always skips the
+// IP dimension, so calling it would be a pure no-op. FailNextRecordSuccess
+// staying un-consumed after a successful Refresh is the proof: if Refresh
+// had called RecordSuccess, this field would have been reset to nil.
+func TestRefresh_Success_NeverCallsRecordSuccess(t *testing.T) {
+	svc, refreshTokens, sessionRepo, abuseProtection, _, ctx, _ := newTestRefreshTokenServiceForFaultInjection(t, false)
+	raw, _ := seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))
+	abuseProtection.FailNextRecordSuccess = errors.New("redis: connection reset by peer")
+
+	if _, err := svc.Refresh(ctx, raw, LoginMeta{IPAddress: "203.0.113.1"}); err != nil {
+		t.Fatalf("Refresh() error = %v, want nil", err)
+	}
+
+	if abuseProtection.FailNextRecordSuccess == nil {
+		t.Error("FailNextRecordSuccess was consumed — Refresh unexpectedly called RecordSuccess, a policy change from Milestone 6C's approved IP-only design")
+	}
+}
