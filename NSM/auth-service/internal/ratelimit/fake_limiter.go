@@ -27,6 +27,32 @@ type FakeAuthAbuseProtection struct {
 	cfg      Config
 	counters map[string]*fakeCounter
 	blocked  map[string]time.Time
+	// FailNextCheck/FailNextRecordFailure/FailNextRecordSuccess, if
+	// non-nil, are consumed by the next matching call and reset to nil —
+	// the same fault-injection convention used throughout this codebase
+	// (FakeSessionRepository.FailNextRevoke, FakeUserRepository.FailNextGetByEmail,
+	// etc.), added for Milestone 6C's gap-analysis follow-up: proving
+	// AuthService/RefreshTokenService behave correctly when the
+	// abuse-protection layer itself fails.
+	//
+	// FailNextRecordFailure/FailNextRecordSuccess are returned verbatim —
+	// RecordFailure/RecordSuccess are always best-effort, so a caller
+	// seeing this exact error and logging-then-swallowing it is the
+	// correct, already-implemented behavior being tested, not a new one.
+	//
+	// FailNextCheck is different, deliberately: RedisAuthAbuseProtection.Check
+	// never returns a Redis connectivity problem as a Go error — it
+	// resolves the configured FailClosed posture internally and returns a
+	// plain Decision (see that method's own doc comment). Consuming
+	// FailNextCheck here does the same, resolving to
+	// Decision{Allowed: !cfg.FailClosed} rather than returning the
+	// injected error — matching the real implementation's contract
+	// exactly, since a version that just returned the raw error would
+	// test a code path AuthService.Login doesn't actually have (Login
+	// discards Check's error return and only reads Decision.Allowed).
+	FailNextCheck         error
+	FailNextRecordFailure error
+	FailNextRecordSuccess error
 }
 
 func NewFakeAuthAbuseProtection(cfg Config) *FakeAuthAbuseProtection {
@@ -52,6 +78,10 @@ func (f *FakeAuthAbuseProtection) key(operation string, d activeDimension) strin
 func (f *FakeAuthAbuseProtection) Check(_ context.Context, operation string, dims Dimensions) (Decision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextCheck != nil {
+		f.FailNextCheck = nil
+		return Decision{Allowed: !f.cfg.FailClosed}, nil
+	}
 	now := time.Now()
 	for _, d := range f.active(operation, dims) {
 		k := f.key(operation, d)
@@ -68,6 +98,11 @@ func (f *FakeAuthAbuseProtection) Check(_ context.Context, operation string, dim
 func (f *FakeAuthAbuseProtection) RecordFailure(_ context.Context, operation string, dims Dimensions) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextRecordFailure != nil {
+		err := f.FailNextRecordFailure
+		f.FailNextRecordFailure = nil
+		return false, err
+	}
 	now := time.Now()
 	blockedNow := false
 	for _, d := range f.active(operation, dims) {
@@ -92,6 +127,11 @@ func (f *FakeAuthAbuseProtection) RecordFailure(_ context.Context, operation str
 func (f *FakeAuthAbuseProtection) RecordSuccess(_ context.Context, operation string, dims Dimensions) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailNextRecordSuccess != nil {
+		err := f.FailNextRecordSuccess
+		f.FailNextRecordSuccess = nil
+		return err
+	}
 	for _, d := range f.active(operation, dims) {
 		if d.name == "ip" {
 			continue

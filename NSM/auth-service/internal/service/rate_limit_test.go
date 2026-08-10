@@ -3,9 +3,16 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/acme/auth-service/internal/entity"
+	"github.com/acme/auth-service/internal/logging"
 	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
@@ -225,5 +232,182 @@ func TestLogin_RateLimited_WritesBoundedAuditEvent(t *testing.T) {
 	}
 	if rateLimitedEvents != 1 {
 		t.Errorf("auth.rate_limited audit events = %d, want exactly 1 (bounded to the block transition)", rateLimitedEvents)
+	}
+}
+
+// --- fault injection: abuse-protection outcome-recording failures ---
+//
+// AuthService.Login treats every AbuseProtection call according to the
+// policy already implemented in auth_service.go: Check's own error is
+// resolved internally per Config.FailClosed and never reaches Login as a
+// Go error at all (see fake_limiter.go's FailNextCheck doc comment, which
+// mirrors RedisAuthAbuseProtection.Check's real contract); RecordFailure
+// and RecordSuccess are always best-effort, so their errors are logged
+// and swallowed, never surfaced to the caller (recordLoginFailure's and
+// Login's own doc comments). These tests prove that existing behavior
+// continues to hold when the abuse-protection layer itself errors — they
+// do not invent any new policy.
+
+// newTestAuthServiceForFaultInjection is newTestAuthServiceWithAbuseProtection
+// plus the two things these tests specifically need that the shared
+// helper doesn't expose: an explicit FailClosed posture, and a logger
+// (via context, the same way AuthService actually reads it — see
+// logging.FromContext) the test can inspect with zaptest/observer.
+func newTestAuthServiceForFaultInjection(t *testing.T, failClosed bool) (svc *AuthService, users *mocks.FakeUserRepository, abuseProtection *ratelimit.FakeAuthAbuseProtection, audit *mocks.FakeAuditLogRepository, ctx context.Context, logs *observer.ObservedLogs) {
+	t.Helper()
+	users = mocks.NewFakeUserRepository()
+	sessions := mocks.NewFakeSessionRepository()
+	refreshTokens := mocks.NewFakeRefreshTokenRepository()
+	loginHistory := mocks.NewFakeLoginHistoryRepository()
+	audit = mocks.NewFakeAuditLogRepository()
+	auditTx := func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return fn(audit)
+	}
+	abuseProtection = ratelimit.NewFakeAuthAbuseProtection(ratelimit.Config{
+		FailClosed: failClosed,
+		Operations: map[string]ratelimit.OperationPolicy{
+			ratelimit.OperationLogin: {
+				Account: &ratelimit.DimensionPolicy{Window: 15 * time.Minute, Limit: 5, BlockDuration: 15 * time.Minute},
+			},
+		},
+	})
+	svc = NewAuthService(AuthServiceDeps{
+		Users:               users,
+		Sessions:            sessions,
+		RefreshTokens:       refreshTokens,
+		LoginHistory:        loginHistory,
+		Tokens:              util.NewJWTSigner("test-signing-key-at-least-32-bytes!", 15*time.Minute),
+		Passwords:           security.NewPasswordService(testPasswordParams),
+		RefreshTTL:          30 * 24 * time.Hour,
+		AuditTx:             auditTx,
+		AbuseProtection:     abuseProtection,
+		RateLimitRetryAfter: 60 * time.Second,
+	})
+	core, observedLogs := observer.New(zapcore.DebugLevel)
+	logs = observedLogs
+	ctx = logging.WithContext(t.Context(), zap.New(core))
+	return svc, users, abuseProtection, audit, ctx, logs
+}
+
+// A: a Check failure follows the existing, already-configured
+// fail-open/fail-closed posture — proven at both settings, not just one,
+// since either without the other would leave the actual policy unproven.
+
+func TestLogin_AbuseProtectionCheckFailure_FailClosed(t *testing.T) {
+	svc, users, abuseProtection, _, ctx, _ := newTestAuthServiceForFaultInjection(t, true)
+	seedUser(t, users, "victim@example.com", "Tr0ub4dor&3xample!")
+	abuseProtection.FailNextCheck = errors.New("redis: connection refused")
+
+	_, err := svc.Login(ctx, "org-1", "victim@example.com", "Tr0ub4dor&3xample!", LoginMeta{IPAddress: "203.0.113.1"})
+	var limited RateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("Login() with Check failing and FailClosed=true, error = %v, want RateLimitedError", err)
+	}
+}
+
+func TestLogin_AbuseProtectionCheckFailure_FailOpen(t *testing.T) {
+	svc, users, abuseProtection, _, ctx, _ := newTestAuthServiceForFaultInjection(t, false)
+	seedUser(t, users, "victim@example.com", "Tr0ub4dor&3xample!")
+	abuseProtection.FailNextCheck = errors.New("redis: connection refused")
+
+	// A correct password must still succeed: FailClosed=false means a
+	// Check that can't reach Redis resolves to "allowed", not "blocked".
+	if _, err := svc.Login(ctx, "org-1", "victim@example.com", "Tr0ub4dor&3xample!", LoginMeta{IPAddress: "203.0.113.1"}); err != nil {
+		t.Fatalf("Login() with Check failing and FailClosed=false, error = %v, want nil", err)
+	}
+}
+
+// B, C, D, E: a RecordFailure failure must not panic, must not leak the
+// underlying Redis error to the client, must leave the authentication
+// response and the independent PostgreSQL lockout layer exactly as they
+// already behave without any Redis problem, and the logging/audit
+// footprint it leaves must stay bounded to the one existing Error log
+// line — no auth.rate_limited audit event, since recordLoginFailure
+// returns before ever checking the blocked flag once RecordFailure itself
+// errors.
+func TestLogin_RecordFailureError_BoundedAndNotLeaked(t *testing.T) {
+	svc, users, abuseProtection, audit, ctx, logs := newTestAuthServiceForFaultInjection(t, false)
+	seedUser(t, users, "victim@example.com", "Tr0ub4dor&3xample!")
+	injected := errors.New("redis: connection reset by peer")
+	abuseProtection.FailNextRecordFailure = injected
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Login() panicked: %v", r) // B
+			}
+		}()
+		_, err = svc.Login(ctx, "org-1", "victim@example.com", "wrong-password", LoginMeta{IPAddress: "203.0.113.1"})
+	}()
+
+	// C: the client-visible error is still the existing generic
+	// entity.ErrInvalidCredentials — never the injected error, and never a
+	// string containing it.
+	if !errors.Is(err, entity.ErrInvalidCredentials) {
+		t.Fatalf("Login() error = %v, want entity.ErrInvalidCredentials", err)
+	}
+	if strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("Login() error = %q leaks the underlying abuse-protection error %q", err.Error(), injected.Error())
+	}
+
+	// D: the independent PostgreSQL lockout layer must be unaffected by
+	// the Redis-layer failure — it still sees this as attempt 1, exactly
+	// as it would if RecordFailure had not errored at all.
+	stored, getErr := users.GetByEmail(ctx, "org-1", "victim@example.com")
+	if getErr != nil {
+		t.Fatalf("GetByEmail(): %v", getErr)
+	}
+	if stored.FailedLoginAttempts != 1 {
+		t.Errorf("FailedLoginAttempts = %d, want 1 — the Postgres lockout layer must be unaffected by the Redis-layer failure", stored.FailedLoginAttempts)
+	}
+
+	// E: exactly the one existing Error log line, and no rate-limit audit
+	// event.
+	failureLogs := logs.FilterMessage("failed to record login failure in abuse-protection layer").All()
+	if len(failureLogs) != 1 {
+		t.Fatalf(`"failed to record login failure..." log entries = %d, want exactly 1`, len(failureLogs))
+	}
+	if got := failureLogs[0].ContextMap()["error"]; got != injected.Error() {
+		t.Errorf("logged error field = %v, want %q — the failure must be observed, not silently swallowed", got, injected.Error())
+	}
+	for _, entry := range audit.Entries {
+		if entry.Action == "auth.rate_limited" {
+			t.Errorf("unexpected auth.rate_limited audit event written after a RecordFailure error: %+v", entry)
+		}
+	}
+}
+
+// F: a RecordSuccess failure is handled the way Login already handles it
+// — logged and swallowed, never changing the outcome of a login that has
+// already succeeded by the time RecordSuccess runs.
+func TestLogin_RecordSuccessError_LoginStillSucceeds(t *testing.T) {
+	svc, users, abuseProtection, _, ctx, logs := newTestAuthServiceForFaultInjection(t, false)
+	seedUser(t, users, "victim@example.com", "Tr0ub4dor&3xample!")
+	injected := errors.New("redis: connection reset by peer")
+	abuseProtection.FailNextRecordSuccess = injected
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Login() panicked: %v", r)
+			}
+		}()
+		_, err = svc.Login(ctx, "org-1", "victim@example.com", "Tr0ub4dor&3xample!", LoginMeta{IPAddress: "203.0.113.1"})
+	}()
+	if err != nil {
+		t.Fatalf("Login() with RecordSuccess failing, error = %v, want nil — a bookkeeping failure must not change an already-decided successful login", err)
+	}
+
+	resetLogs := logs.FilterMessage("failed to reset abuse-protection counters after successful login").All()
+	if len(resetLogs) != 1 {
+		t.Fatalf(`"failed to reset abuse-protection counters..." log entries = %d, want exactly 1`, len(resetLogs))
+	}
+	// The failure must be observed, not silently swallowed — the injected
+	// error is expected as a structured zap.Error field on that one log
+	// line, not absent from it and not folded into the response.
+	if got := resetLogs[0].ContextMap()["error"]; got != injected.Error() {
+		t.Errorf("logged error field = %v, want %q", got, injected.Error())
 	}
 }

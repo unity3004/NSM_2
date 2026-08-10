@@ -47,6 +47,16 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U authsvc -d authdb_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      # Same image/port/healthcheck as docker/docker-compose.yml's redis
+      # service — internal/ratelimit's Redis-backed abuse protection
+      # (Milestone 6C) needs a real Redis for test/integration/ratelimit_test.go
+      # to actually run instead of skipping.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -68,6 +78,7 @@ jobs:
         run: go test ./test/integration/... -tags=integration -race
         env:
           DATABASE_URL: postgres://authsvc:testpassword@localhost:5432/authdb_test?sslmode=disable
+          REDIS_ADDR: localhost:6379
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
