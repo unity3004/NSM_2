@@ -56,6 +56,7 @@ func identityEchoHandler() http.Handler {
 			return
 		}
 		w.Header().Set("X-Test-Subject", identity.Subject)
+		w.Header().Set("X-Test-Session-Id", identity.SessionID)
 		w.Header().Set("X-Test-Token-Id", identity.TokenID)
 		w.WriteHeader(http.StatusOK)
 	})
@@ -76,7 +77,7 @@ func doAuthenticatedRequest(tokens *security.TokenService, audience, authorizati
 
 func TestAuthenticate_ValidToken(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := tokens.CreateAccessToken("user-1", testAudience)
+	access, err := tokens.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -88,6 +89,13 @@ func TestAuthenticate_ValidToken(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Test-Subject"); got != "user-1" {
 		t.Errorf("downstream saw Subject = %q, want %q", got, "user-1")
+	}
+	// The real, previously-missing piece this milestone fixed: a real
+	// token, through the real middleware.Authenticate chain, must now
+	// surface its session ID to downstream handlers (e.g.
+	// logoutHandler.logout) rather than always reporting it empty.
+	if got := rec.Header().Get("X-Test-Session-Id"); got != "session-1" {
+		t.Errorf("downstream saw SessionID = %q, want %q", got, "session-1")
 	}
 	if rec.Header().Get("X-Test-Token-Id") == "" {
 		t.Error("downstream saw an empty TokenID")
@@ -143,7 +151,7 @@ func TestAuthenticate_InvalidJWT(t *testing.T) {
 
 func TestAuthenticate_ExpiredJWT(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", -time.Minute)
-	access, err := tokens.CreateAccessToken("user-1", testAudience)
+	access, err := tokens.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -153,7 +161,7 @@ func TestAuthenticate_ExpiredJWT(t *testing.T) {
 
 func TestAuthenticate_WrongAudience(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := tokens.CreateAccessToken("user-1", testAudience)
+	access, err := tokens.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -163,7 +171,7 @@ func TestAuthenticate_WrongAudience(t *testing.T) {
 
 func TestAuthenticate_WrongIssuer(t *testing.T) {
 	issuerA := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := issuerA.CreateAccessToken("user-1", testAudience)
+	access, err := issuerA.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -177,7 +185,7 @@ func TestAuthenticate_WrongIssuer(t *testing.T) {
 
 func TestAuthenticate_InvalidSignature(t *testing.T) {
 	signerA := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := signerA.CreateAccessToken("user-1", testAudience)
+	access, err := signerA.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -217,7 +225,7 @@ func TestAuthenticate_RefreshTokenNotAcceptedAsAccessToken(t *testing.T) {
 // downstream handler, and its response headers are read back here.
 func TestAuthenticate_IdentityInContextAndRetrievable(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := tokens.CreateAccessToken("user-42", testAudience)
+	access, err := tokens.CreateAccessToken("user-42", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -238,7 +246,7 @@ func TestAuthenticate_IdentityInContextAndRetrievable(t *testing.T) {
 // print the raw token itself, only booleans.
 func TestAuthenticate_RawJWTNotStoredInContext(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", time.Hour)
-	access, err := tokens.CreateAccessToken("user-1", testAudience)
+	access, err := tokens.CreateAccessToken("user-1", testAudience, "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken: %v", err)
 	}
@@ -272,7 +280,7 @@ func TestAuthenticate_PerformsNoAuthorization(t *testing.T) {
 	tokens := newTestTokenService(t, "key-1", "auth-service", time.Hour)
 
 	for _, subject := range []string{"user-1", "some-completely-different-service-account-id"} {
-		access, err := tokens.CreateAccessToken(subject, testAudience)
+		access, err := tokens.CreateAccessToken(subject, testAudience, "session-1")
 		if err != nil {
 			t.Fatalf("CreateAccessToken(%q): %v", subject, err)
 		}

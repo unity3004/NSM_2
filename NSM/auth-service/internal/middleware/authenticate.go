@@ -14,23 +14,24 @@ import (
 // AuthenticatedIdentity is what Authenticate places on the request
 // context after a token validates — deliberately minimal, matching
 // exactly what security.AccessTokenClaims actually carries (iss/sub/aud/
-// iat/exp/jti, per that type's own doc comment). It is not util.Claims
+// iat/exp/jti/sid, per that type's own doc comment). It is not util.Claims
 // (the pre-existing Auth middleware's identity type, below): that type's
-// OrganizationID/SessionID/Permissions fields describe the old HS256
-// implementation's richer, session-linked claim shape, which the new
-// access tokens this middleware validates don't carry — reusing it here
-// would mean fabricating fields, not reusing an abstraction. There is
-// deliberately no IdentityType field either: nothing today mints an
-// access token for anything but a user subject (service-account token
-// issuance is a later, explicitly separate milestone), so a type
-// distinction would describe a capability that doesn't exist yet.
+// OrganizationID/Permissions fields describe the old HS256 implementation's
+// richer claim shape, which the new access tokens this middleware
+// validates don't carry — reusing it here would mean fabricating fields,
+// not reusing an abstraction. There is deliberately no IdentityType field
+// either: nothing today mints an access token for anything but a user
+// subject (service-account token issuance is a later, explicitly separate
+// milestone), so a type distinction would describe a capability that
+// doesn't exist yet.
 type AuthenticatedIdentity struct {
 	// Subject is the token's `sub` claim.
 	Subject string
-	// SessionID is populated only if a future claim design adds one —
-	// security.AccessTokenClaims doesn't carry one today, so this is
-	// always empty for now. Kept as a field so downstream code that will
-	// eventually want it doesn't need a breaking signature change later.
+	// SessionID is the token's `sid` claim — populated for every access
+	// token minted by RefreshTokenService.Refresh (the only real caller
+	// today), which always has a live session to name. Empty only for a
+	// token that was never associated with one, e.g. a hypothetical future
+	// service-account token.
 	SessionID string
 	// TokenID is the token's `jti` claim. Like the token itself, this is
 	// never logged in full anywhere in this package.
@@ -110,8 +111,9 @@ func Authenticate(tokens *security.TokenService, audience string) func(http.Hand
 			}
 
 			identity := AuthenticatedIdentity{
-				Subject: claims.Subject,
-				TokenID: claims.ID,
+				Subject:   claims.Subject,
+				SessionID: claims.SessionID,
+				TokenID:   claims.ID,
 			}
 			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), identity)))
 		})

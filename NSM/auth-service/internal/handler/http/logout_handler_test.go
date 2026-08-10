@@ -79,10 +79,12 @@ func TestLogoutHandler_MissingIdentity(t *testing.T) {
 
 // --- missing session identity in an otherwise-authenticated request ---
 
-// TestLogoutHandler_MissingSessionID exercises exactly what the real
-// middleware.Authenticate chain produces today (see
-// middleware.AuthenticatedIdentity's own doc comment: SessionID is
-// always empty, since the access-token claims don't carry one) —
+// TestLogoutHandler_MissingSessionID covers the defensive case: an
+// AuthenticatedIdentity with no SessionID, which a real
+// middleware.Authenticate chain no longer produces for a normal user
+// access token (security.AccessTokenClaims now carries `sid` — see that
+// type's own doc comment) but which a future issuer without a session to
+// name (e.g. a service-account token) legitimately still could —
 // requirement #23: this must be a safe 401, never a crash or a
 // silently-wrong revocation.
 func TestLogoutHandler_MissingSessionID(t *testing.T) {

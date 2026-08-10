@@ -30,13 +30,17 @@ var (
 // to have been issued minutes or hours from now.
 const clockSkewAllowance = 5 * time.Second
 
-// AccessTokenClaims carries exactly the registered claims Milestone 5A
-// requires — iss, sub, aud, iat, exp, jti — nothing else. Unlike
-// util.Claims (the existing HS256 implementation's payload; see this
-// milestone's report on why that implementation is untouched), it
-// deliberately carries no organization ID, session ID, or permissions:
-// this milestone's required claim list is exhaustive, not a floor.
+// AccessTokenClaims carries the registered claims Milestone 5A requires —
+// iss, sub, aud, iat, exp, jti — plus SessionID (`sid`), added once a real
+// caller (Milestone 6B's logout/current) needed to know which session
+// minted the token, exactly as middleware.AuthenticatedIdentity.SessionID's
+// own doc comment anticipated. It still carries no organization ID or
+// permissions: those remain out of scope for this claim set. SessionID is
+// optional (omitempty) — a hypothetical future service-account access
+// token, which has no session at all, would simply omit it, the same way
+// util.Claims.SessionID already tolerates being empty for the HS256 flow.
 type AccessTokenClaims struct {
+	SessionID string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -67,8 +71,9 @@ func NewTokenService(keys *SigningKeySet, issuer string, ttl time.Duration) *Tok
 // a stable user or service-account identity ID (entity.User.ID /
 // entity.ServiceAccount.ID); audience is the API/service this token is
 // intended for. Neither may be empty: an unaddressed or subjectless token
-// is never a legitimate thing to mint.
-func (s *TokenService) CreateAccessToken(subject, audience string) (string, error) {
+// is never a legitimate thing to mint. sessionID, unlike subject and
+// audience, may be empty — see AccessTokenClaims' own doc comment on why.
+func (s *TokenService) CreateAccessToken(subject, audience, sessionID string) (string, error) {
 	if subject == "" {
 		return "", ErrMissingSubject
 	}
@@ -82,14 +87,17 @@ func (s *TokenService) CreateAccessToken(subject, audience string) (string, erro
 	}
 
 	now := time.Now()
-	claims := AccessTokenClaims{jwt.RegisteredClaims{
-		Issuer:    s.issuer,
-		Subject:   subject,
-		Audience:  jwt.ClaimStrings{audience},
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(s.ttl)),
-		ID:        jti,
-	}}
+	claims := AccessTokenClaims{
+		SessionID: sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    s.issuer,
+			Subject:   subject,
+			Audience:  jwt.ClaimStrings{audience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.ttl)),
+			ID:        jti,
+		},
+	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	// The kid header is what lets a verifier — and ValidateAccessToken's

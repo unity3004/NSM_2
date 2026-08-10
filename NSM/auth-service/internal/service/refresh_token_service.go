@@ -207,7 +207,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 		logging.FromContext(ctx).Error("failed to touch session after refresh", zap.Error(err))
 	}
 
-	accessToken, err := s.deps.Tokens.CreateAccessToken(current.UserID, s.deps.AccessTokenAudience)
+	accessToken, err := s.deps.Tokens.CreateAccessToken(current.UserID, s.deps.AccessTokenAudience, current.SessionID)
 	if err != nil {
 		refreshErr = err
 		return nil, refreshErr

@@ -17,11 +17,11 @@ import (
 // authentication/session *design* error — something upstream should
 // never have let happen — never as "revoke nothing and silently
 // succeed," and never as a hint to guess which session was meant.
-// security.AccessTokenClaims doesn't carry a session claim today (see
-// middleware.AuthenticatedIdentity's own doc comment), so this is the
-// path every logout attempt takes against the system as currently wired;
-// Logout is still built to work correctly the moment a future claims
-// design adds one, rather than being reshaped around today's gap.
+// security.AccessTokenClaims now carries a session claim (`sid` — see
+// that type's own doc comment) for every token RefreshTokenService.Refresh
+// mints, so a real caller no longer hits this path; it remains a defensive
+// guard for any future access-token issuer that legitimately has no
+// session to name (e.g. a service-account token).
 var ErrMissingSessionIdentity = errors.New("service: authenticated identity has no session ID")
 
 // LogoutServiceDeps wires LogoutService to the abstractions Milestone 6B

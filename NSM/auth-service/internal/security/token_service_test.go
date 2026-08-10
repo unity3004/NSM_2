@@ -79,7 +79,7 @@ func validClaims(issuer, audience string, now time.Time) map[string]any {
 func TestTokenService_CreateAccessToken_Success(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", 10*time.Minute)
 
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v, want nil", err)
 	}
@@ -93,15 +93,37 @@ func TestTokenService_CreateAccessToken_Success(t *testing.T) {
 
 func TestTokenService_CreateAccessToken_MissingSubject(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", 10*time.Minute)
-	if _, err := svc.CreateAccessToken("", "billing-api"); !errors.Is(err, ErrMissingSubject) {
+	if _, err := svc.CreateAccessToken("", "billing-api", "session-1"); !errors.Is(err, ErrMissingSubject) {
 		t.Errorf("CreateAccessToken() with no subject, error = %v, want ErrMissingSubject", err)
 	}
 }
 
 func TestTokenService_CreateAccessToken_MissingAudience(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", 10*time.Minute)
-	if _, err := svc.CreateAccessToken("user-1", ""); !errors.Is(err, ErrMissingAudience) {
+	if _, err := svc.CreateAccessToken("user-1", "", "session-1"); !errors.Is(err, ErrMissingAudience) {
 		t.Errorf("CreateAccessToken() with no audience, error = %v, want ErrMissingAudience", err)
+	}
+}
+
+// TestTokenService_CreateAccessToken_SessionIDOptional proves sessionID,
+// unlike subject and audience, is never required — an empty value is
+// accepted (never ErrMissingSubject/ErrMissingAudience's sibling), the
+// token still validates, and ValidateAccessToken reports SessionID back
+// as "", matching AccessTokenClaims' own omitempty contract for a token
+// that legitimately has no session to name.
+func TestTokenService_CreateAccessToken_SessionIDOptional(t *testing.T) {
+	svc, _ := newTestTokenService(t, "auth-service", 10*time.Minute)
+
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "")
+	if err != nil {
+		t.Fatalf("CreateAccessToken() with no session ID, error = %v, want nil", err)
+	}
+	claims, err := svc.ValidateAccessToken(token, "billing-api")
+	if err != nil {
+		t.Fatalf("ValidateAccessToken() error = %v, want nil", err)
+	}
+	if claims.SessionID != "" {
+		t.Errorf("SessionID = %q, want empty", claims.SessionID)
 	}
 }
 
@@ -116,7 +138,7 @@ func TestTokenService_CreateAccessToken_JTIUniqueAcrossTokens(t *testing.T) {
 	const attempts = 50
 	seen := make(map[string]bool, attempts)
 	for i := 0; i < attempts; i++ {
-		token, err := svc.CreateAccessToken("user-1", "billing-api")
+		token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 		if err != nil {
 			t.Fatalf("CreateAccessToken() error = %v", err)
 		}
@@ -139,7 +161,7 @@ func TestTokenService_CreateAccessToken_JTIUniqueAcrossTokens(t *testing.T) {
 // a verifier's key lookup keys on.
 func TestTokenService_CreateAccessToken_KIDPresent(t *testing.T) {
 	svc, keys := newTestTokenService(t, "auth-service", 10*time.Minute)
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -163,7 +185,7 @@ func TestTokenService_CreateAccessToken_NeverLeaksPrivateKey(t *testing.T) {
 	svc, keys := newTestTokenService(t, "auth-service", 10*time.Minute)
 	privB64 := base64.RawStdEncoding.EncodeToString(keys.PrivateKey)
 
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -171,7 +193,7 @@ func TestTokenService_CreateAccessToken_NeverLeaksPrivateKey(t *testing.T) {
 		t.Error("created token contains the raw private key")
 	}
 
-	_, err = svc.CreateAccessToken("", "billing-api")
+	_, err = svc.CreateAccessToken("", "billing-api", "session-1")
 	if err != nil && strings.Contains(err.Error(), privB64) {
 		t.Errorf("error message leaked the private key: %v", err)
 	}
@@ -183,7 +205,7 @@ func TestTokenService_ValidateAccessToken_Success(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", 10*time.Minute)
 	before := time.Now()
 
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -194,6 +216,9 @@ func TestTokenService_ValidateAccessToken_Success(t *testing.T) {
 
 	if claims.Subject != "user-1" {
 		t.Errorf("Subject = %q, want %q", claims.Subject, "user-1")
+	}
+	if claims.SessionID != "session-1" {
+		t.Errorf("SessionID = %q, want %q", claims.SessionID, "session-1")
 	}
 	if claims.Issuer != "auth-service" {
 		t.Errorf("Issuer = %q, want %q", claims.Issuer, "auth-service")
@@ -217,7 +242,7 @@ func TestTokenService_ValidateAccessToken_Success(t *testing.T) {
 
 func TestTokenService_ValidateAccessToken_WrongSigningKey(t *testing.T) {
 	svcA, keysA := newTestTokenService(t, "auth-service", time.Hour)
-	token, err := svcA.CreateAccessToken("user-1", "billing-api")
+	token, err := svcA.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -240,7 +265,7 @@ func TestTokenService_ValidateAccessToken_WrongSigningKey(t *testing.T) {
 
 func TestTokenService_ValidateAccessToken_WrongIssuer(t *testing.T) {
 	svcA, keys := newTestTokenService(t, "auth-service", time.Hour)
-	token, err := svcA.CreateAccessToken("user-1", "billing-api")
+	token, err := svcA.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -253,7 +278,7 @@ func TestTokenService_ValidateAccessToken_WrongIssuer(t *testing.T) {
 
 func TestTokenService_ValidateAccessToken_WrongAudience(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", time.Hour)
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}
@@ -265,7 +290,7 @@ func TestTokenService_ValidateAccessToken_WrongAudience(t *testing.T) {
 
 func TestTokenService_ValidateAccessToken_Expired(t *testing.T) {
 	svc, _ := newTestTokenService(t, "auth-service", -time.Minute)
-	token, err := svc.CreateAccessToken("user-1", "billing-api")
+	token, err := svc.CreateAccessToken("user-1", "billing-api", "session-1")
 	if err != nil {
 		t.Fatalf("CreateAccessToken() error = %v", err)
 	}

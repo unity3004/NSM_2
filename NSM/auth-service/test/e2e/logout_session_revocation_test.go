@@ -23,35 +23,41 @@ import (
 //
 // A second logout endpoint exists — POST /v1/auth/logout/current
 // (Milestone 6B, logoutHandler -> service.LogoutService.Logout, gated by
-// middleware.Authenticate) — and it is deliberately NOT used here, because
-// it cannot be reached through any genuine end-to-end flow in the current
-// wiring: middleware.AuthenticatedIdentity.SessionID is always empty (the
-// Ed25519 access-token claims security.TokenService mints carry no session
-// claim at all — see middleware.AuthenticatedIdentity's own doc comment and
-// service.LogoutService.Logout's), so a real caller deterministically hits
-// service.ErrMissingSessionIdentity and gets 401 UNAUTHENTICATED before the
-// handler's own logic ever runs. internal/handler/http/logout_handler_test.go's
-// existing coverage of that endpoint only passes because it injects the
-// identity directly via middleware.WithIdentity, bypassing real token-to-
-// identity derivation entirely. This is a real, pre-existing gap in the
-// wired system, not something this suite may fix (see the milestone's own
-// "do not redesign the authentication architecture" instruction) — it is
-// reported as a remaining security gap instead.
+// middleware.Authenticate) — and the core scenarios below still don't use
+// it as their primary path, for continuity with test/e2e's other suites
+// (Scenario #1 and E2E-02), both of which are built around the HS256
+// access token Register+Login actually issues. It WAS, until fixed,
+// unreachable through any genuine end-to-end flow at all:
+// middleware.AuthenticatedIdentity.SessionID was always empty (the Ed25519
+// access-token claims security.TokenService minted carried no session
+// claim), so a real caller deterministically hit
+// service.ErrMissingSessionIdentity and got 401 UNAUTHENTICATED before the
+// handler's own logic ever ran — internal/handler/http/logout_handler_test.go's
+// existing coverage of that endpoint only ever passed because it injects
+// the identity directly via middleware.WithIdentity, bypassing real
+// token-to-identity derivation entirely. That gap has since been fixed:
+// security.AccessTokenClaims now carries a `sid` claim, populated by
+// RefreshTokenService.Refresh (the only real minter of these tokens) and
+// surfaced by middleware.Authenticate. TestE2E_LogoutCurrent_RealFlow
+// below is the proof — a real Login, a real POST /v1/auth/refresh to mint
+// an Ed25519 access token, and a real POST /v1/auth/logout/current that
+// now actually succeeds.
 //
 // A second, related finding this suite deliberately tests for rather than
-// assumes: the legacy endpoint under test here is NOT idempotent. Unlike
-// service.LogoutService.Logout (which revokes through *SessionService and
-// inherits its own idempotent no-op-on-already-revoked behavior),
-// service.AuthService.Logout calls repository.SessionRepository.Revoke
-// directly. That method's `UPDATE ... WHERE revoked_at IS NULL` affects
-// zero rows the second time, which postgres.checkRowsAffected turns into
-// entity.ErrNotFound -> a 404 NOT_FOUND on a repeated logout, not a second
-// 204. See TestE2E_Logout_RepeatedLogout below, which asserts the actual
-// observed behavior rather than an assumed one.
+// assumes: the legacy endpoint under test in the core scenarios below is
+// NOT idempotent. Unlike service.LogoutService.Logout (which revokes
+// through *SessionService and inherits its own idempotent
+// no-op-on-already-revoked behavior), service.AuthService.Logout calls
+// repository.SessionRepository.Revoke directly. That method's
+// `UPDATE ... WHERE revoked_at IS NULL` affects zero rows the second time,
+// which postgres.checkRowsAffected turns into entity.ErrNotFound -> a 404
+// NOT_FOUND on a repeated logout, not a second 204. See
+// TestE2E_Logout_RepeatedLogout below, which asserts the actual observed
+// behavior rather than an assumed one.
 //
 // A third finding — service.AuthService.Logout wrote no audit_logs row at
-// all, unlike Login, Refresh, and the (unreachable) Milestone 6B logout
-// flow — was reported and has since been fixed: see
+// all, unlike Login, Refresh, and the Milestone 6B logout flow — was
+// reported and has since been fixed: see
 // service.AuthService.recordLogoutAudit. This suite's AuditEvents subtest
 // now verifies the real, current behavior.
 
@@ -380,5 +386,72 @@ func TestE2E_Logout_OtherSessionsUnaffected(t *testing.T) {
 	refreshResp, _, refreshRaw := doRefresh(t, env, refreshB)
 	if refreshResp.StatusCode != http.StatusOK {
 		t.Errorf("session B's refresh token rejected after session A's logout: status = %d; body = %s", refreshResp.StatusCode, refreshRaw)
+	}
+}
+
+// TestE2E_LogoutCurrent_RealFlow proves the session-ID fix: POST
+// /v1/auth/logout/current (Milestone 6B), previously unreachable by any
+// genuine end-to-end flow (see this file's top-level doc comment), now
+// works. Login mints Token A (HS256, unused here beyond obtaining a real
+// refresh token); POST /v1/auth/refresh mints an Ed25519 access token
+// carrying a real `sid` claim for the first time; POST
+// /v1/auth/logout/current, authenticated with that token, revokes the
+// session for real — verified in PostgreSQL, not just by a 204.
+func TestE2E_LogoutCurrent_RealFlow(t *testing.T) {
+	env := newE2EEnv(t)
+	_, _, refreshTokenA, sessionID := registerAndLogin(t, env)
+
+	refreshResp, refreshOut, refreshRaw := doRefresh(t, env, refreshTokenA)
+	if refreshResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /v1/auth/refresh: status = %d, want %d; body = %s", refreshResp.StatusCode, http.StatusOK, refreshRaw)
+	}
+	if refreshOut.SessionID != sessionID {
+		t.Fatalf("refresh returned session_id = %q, want %q (the original login session)", refreshOut.SessionID, sessionID)
+	}
+	accessTokenB := refreshOut.AccessToken
+
+	resp, raw := postJSON(t, env.Server.Client(), env.Server.URL+"/v1/auth/logout/current", struct{}{},
+		map[string]string{"Authorization": "Bearer " + accessTokenB})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /v1/auth/logout/current: status = %d, want %d; body = %s", resp.StatusCode, http.StatusNoContent, raw)
+	}
+	if len(raw) != 0 {
+		t.Errorf("logout/current response body = %q, want empty", raw)
+	}
+
+	row := fetchSessionRow(t, env, sessionID)
+	if !row.RevokedAt.Valid {
+		t.Fatal("session is not revoked in PostgreSQL after POST /v1/auth/logout/current")
+	}
+	if row.RevokedReason.String != "logout" {
+		t.Errorf("session revoked_reason = %q, want %q", row.RevokedReason.String, "logout")
+	}
+
+	// The refresh token minted alongside the Ed25519 access token must no
+	// longer work — RefreshTokenService.Refresh's own ValidateSession
+	// check now sees a revoked session.
+	secondResp, secondOut, secondRaw := doRefresh(t, env, refreshOut.RefreshToken)
+	if secondResp.StatusCode == http.StatusOK {
+		t.Fatal("refresh succeeded using a refresh token from a session revoked via logout/current (body omitted: may contain live tokens)")
+	}
+	if secondResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("refresh after logout/current: status = %d, want %d; body = %s", secondResp.StatusCode, http.StatusUnauthorized, secondRaw)
+	}
+	if secondOut.AccessToken != "" || secondOut.RefreshToken != "" {
+		t.Error("refresh-after-logout/current response unexpectedly parsed as a successful TokenResponse")
+	}
+
+	// LogoutService.recordLogoutAudit already worked correctly before this
+	// fix — it simply never had a real caller reach it. Confirm it fires
+	// for real now.
+	entries := assertLogoutAuditClean(t, env, sessionID, refreshTokenA, accessTokenB, refreshOut.RefreshToken)
+	found := false
+	for _, e := range entries {
+		if e.Result == "success" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no successful auth.logout audit entry was recorded by logout/current")
 	}
 }
