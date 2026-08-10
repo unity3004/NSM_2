@@ -201,15 +201,23 @@ Go code and shouldn't live inside a Go package.
 `Dockerfile` (multi-stage: a `golang:1.26-alpine` build stage, a
 `distroless/static` runtime stage with no shell — nothing for an attacker
 who reaches code execution to pivot with) and `docker-compose.yml` (app +
-Postgres + a one-shot `migrate` service, for `make docker-up`). The
+Postgres + Redis + a one-shot `migrate` service + a one-shot `keygen`
+service, for `make docker-up`). `keygen` runs `cmd/devkeygen` against the
+Dockerfile's own Go-toolchain build stage to generate a disposable,
+development-only Ed25519 access-token signing key into git-ignored
+`docker/.dev-secrets/` before `app` starts — see `cmd/devkeygen`'s own doc
+comment and `configs/.env.example` for the equivalent outside Docker. The
 `.dockerignore` that matters lives at the repo root (Docker resolves it
 against the build context, not the Dockerfile's own directory).
 
 ### `.github/workflows`
 `ci.yml`: lint (`golangci-lint`), a dependency vulnerability scan
-(`govulncheck`), unit + integration tests against a real
-`postgres:16-alpine` service container, and a Docker build — in that
-order, so a build never runs against code that failed lint or tests.
+(`govulncheck`), unit + integration tests against real `postgres:16-alpine`
+and `redis:7.4-alpine` service containers, and a Docker build — in that
+order, so a build never runs against code that failed lint or tests. The
+build job only builds the image (`push: false`); it never starts the
+container, so CI never needs an access-token signing key the way
+`docker compose up` does.
 
 ### `test`
 Everything that is *not* a colocated `_test.go` unit test:
@@ -224,11 +232,13 @@ top-level home.
 
 ### `configs`
 `config.yaml` (non-secret operational defaults — timeouts, pool sizes, log
-format — safe to commit) and `.env.example` (a template for the two
-secrets `internal/config` requires: `AUTH_JWT_SIGNING_KEY` and
-`AUTH_DATABASE_PASSWORD`). Deliberately separate from `internal/config`'s
-*code*. Real `.env` files are gitignored; this is what a new contributor
-copies.
+format — safe to commit) and `.env.example` (a template for the secrets
+`internal/config` requires: `AUTH_JWT_SIGNING_KEY`, `AUTH_DATABASE_PASSWORD`,
+and the access-token signing key `AUTH_ACCESS_TOKEN_KEY_ID`/
+`AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH` — see `cmd/devkeygen` for how to
+generate a disposable development one). Deliberately separate from
+`internal/config`'s *code*. Real `.env` files are gitignored; this is what
+a new contributor copies.
 
 ### `api`
 Points at the canonical `auth-service-openapi.yaml` one level up and
