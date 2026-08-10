@@ -403,13 +403,28 @@ func (s *AuthService) issueSession(ctx context.Context, user *entity.User, meta 
 // RefreshToken implements POST /auth/token/refresh, including
 // rotation-with-reuse-detection: see entity.RefreshToken's doc comment for
 // what AlreadyRotated means and why it triggers a family-wide revocation.
-func (s *AuthService) RefreshToken(ctx context.Context, rawToken string) (*LoginResult, error) {
-	current, err := s.deps.RefreshTokens.GetByTokenHash(ctx, util.HashToken(rawToken))
+// Every exit path writes exactly one best-effort audit_logs row via the
+// deferred call below — the same guarantee Login, Logout, and
+// RefreshTokenService.Refresh's own "auth.token_refresh" audit write
+// already make; this method previously made no such write at all.
+func (s *AuthService) RefreshToken(ctx context.Context, rawToken string, meta LoginMeta) (*LoginResult, error) {
+	var current *entity.RefreshToken
+	var refreshErr error
+	var failureReason string
+	defer func() {
+		s.recordRefreshAudit(ctx, current, refreshErr, failureReason, meta)
+	}()
+
+	var err error
+	current, err = s.deps.RefreshTokens.GetByTokenHash(ctx, util.HashToken(rawToken))
 	if errors.Is(err, entity.ErrNotFound) {
-		return nil, entity.ErrTokenExpired
+		failureReason = "not_found"
+		refreshErr = entity.ErrTokenExpired
+		return nil, refreshErr
 	}
 	if err != nil {
-		return nil, err
+		refreshErr = err
+		return nil, refreshErr
 	}
 
 	if current.AlreadyRotated() {
@@ -423,16 +438,21 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string) (*Login
 		// job on cue is the system working correctly, not failing.
 		logging.FromContext(ctx).Warn("refresh token reuse detected — session family revoked",
 			zap.String("user_id", current.UserID), zap.String("family_id", current.FamilyID), zap.String("session_id", current.SessionID))
-		return nil, entity.ErrTokenReuseDetected
+		failureReason = "reuse_detected"
+		refreshErr = entity.ErrTokenReuseDetected
+		return nil, refreshErr
 	}
 	now := time.Now()
 	if current.RevokedAt != nil || current.IsExpired(now) {
-		return nil, entity.ErrTokenExpired
+		failureReason = "token_revoked_or_expired"
+		refreshErr = entity.ErrTokenExpired
+		return nil, refreshErr
 	}
 
 	nextRaw, err := util.NewOpaqueToken()
 	if err != nil {
-		return nil, err
+		refreshErr = err
+		return nil, refreshErr
 	}
 	next := &entity.RefreshToken{
 		SessionID:     current.SessionID,
@@ -443,17 +463,21 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string) (*Login
 		ExpiresAt:     now.Add(s.deps.RefreshTTL),
 	}
 	if err := s.deps.RefreshTokens.Rotate(ctx, current, next); err != nil {
-		return nil, err
+		failureReason = "rotation_failed"
+		refreshErr = err
+		return nil, refreshErr
 	}
 	_ = s.deps.Sessions.Touch(ctx, current.SessionID, now)
 
 	user, err := s.deps.Users.GetByID(ctx, current.UserID)
 	if err != nil {
-		return nil, err
+		refreshErr = err
+		return nil, refreshErr
 	}
 	accessToken, expiresAt, err := s.deps.Tokens.Sign(user.ID, user.OrganizationID, current.SessionID, nil)
 	if err != nil {
-		return nil, err
+		refreshErr = err
+		return nil, refreshErr
 	}
 
 	return &LoginResult{
@@ -462,6 +486,49 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string) (*Login
 		ExpiresIn:    int(time.Until(expiresAt).Seconds()),
 		SessionID:    current.SessionID,
 	}, nil
+}
+
+// recordRefreshAudit best-effort appends one audit_logs row per
+// refresh attempt — Action "auth.token_refresh", the same action name
+// RefreshTokenService.recordRefreshAudit already uses for the Milestone 5B
+// flow, so the two refresh paths' audit trails are never distinguishable
+// by action name alone. A failure here is logged and swallowed, never
+// surfaced to the caller, the same convention every other audit write in
+// this file already follows.
+func (s *AuthService) recordRefreshAudit(ctx context.Context, current *entity.RefreshToken, refreshErr error, failureReason string, meta LoginMeta) {
+	if s.deps.AuditTx == nil {
+		return
+	}
+
+	result := entity.AuditResultSuccess
+	metadata := map[string]any{}
+	if refreshErr != nil {
+		result = entity.AuditResultFailure
+		metadata["failure_reason"] = failureReason
+	}
+
+	var actorID, resourceID *string
+	if current != nil {
+		actorID = &current.UserID
+		resourceID = &current.SessionID
+	}
+
+	audit := &entity.AuditLogEntry{
+		ActorType:    entity.AuditActorUser,
+		ActorID:      actorID,
+		Action:       "auth.token_refresh",
+		ResourceType: strPtr("session"),
+		ResourceID:   resourceID,
+		Result:       result,
+		IPAddress:    strPtr(meta.IPAddress),
+		Metadata:     metadata,
+	}
+	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
+		return repo.Append(ctx, audit)
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record refresh audit event", zap.Error(err))
+	}
 }
 
 // Logout implements POST /auth/logout: revoke the session and, if the

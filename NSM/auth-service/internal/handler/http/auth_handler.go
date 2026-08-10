@@ -76,7 +76,10 @@ func (h *authHandler) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.svc.RefreshToken(r.Context(), req.RefreshToken)
+	result, err := h.svc.RefreshToken(r.Context(), req.RefreshToken, service.LoginMeta{
+		IPAddress: clientIP(r),
+		UserAgent: r.UserAgent(),
+	})
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

@@ -464,7 +464,7 @@ func TestRefreshToken_RotatesAndDetectsReuse(t *testing.T) {
 		t.Fatalf("Login() error = %v", err)
 	}
 
-	second, err := svc.RefreshToken(t.Context(), first.RefreshToken)
+	second, err := svc.RefreshToken(t.Context(), first.RefreshToken, LoginMeta{})
 	if err != nil {
 		t.Fatalf("RefreshToken() first rotation error = %v", err)
 	}
@@ -473,13 +473,80 @@ func TestRefreshToken_RotatesAndDetectsReuse(t *testing.T) {
 	}
 
 	// Reusing the now-superseded first token is the theft signature.
-	if _, err := svc.RefreshToken(t.Context(), first.RefreshToken); !errors.Is(err, entity.ErrTokenReuseDetected) {
+	if _, err := svc.RefreshToken(t.Context(), first.RefreshToken, LoginMeta{}); !errors.Is(err, entity.ErrTokenReuseDetected) {
 		t.Errorf("RefreshToken() on a reused token = %v, want entity.ErrTokenReuseDetected", err)
 	}
 
 	// The reuse should have revoked the whole family, including the
 	// legitimate second token.
-	if _, err := svc.RefreshToken(t.Context(), second.RefreshToken); err == nil {
+	if _, err := svc.RefreshToken(t.Context(), second.RefreshToken, LoginMeta{}); err == nil {
 		t.Error("RefreshToken() on the second token succeeded after family revocation; want an error")
+	}
+}
+
+// TestRefreshToken_RecordsAuditEventOnSuccess proves AuthService.RefreshToken
+// writes a real audit_logs row — previously-missing behavior, found and
+// fixed the same way AuthService.Logout's own missing audit write was
+// (see that method's history in this file).
+func TestRefreshToken_RecordsAuditEventOnSuccess(t *testing.T) {
+	svc, users, _, _, audit := newTestAuthService(t)
+	u := seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")
+
+	login, err := svc.Login(t.Context(), "org-1", "marcus.webb@acme.com", "Tr0ub4dor&3xample!", LoginMeta{})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	audit.Entries = nil // Login already wrote its own audit row; isolate RefreshToken's.
+
+	result, err := svc.RefreshToken(t.Context(), login.RefreshToken, LoginMeta{IPAddress: "203.0.113.42"})
+	if err != nil {
+		t.Fatalf("RefreshToken() error = %v", err)
+	}
+
+	if len(audit.Entries) != 1 {
+		t.Fatalf("audit_logs has %d entries after refresh, want 1", len(audit.Entries))
+	}
+	entry := audit.Entries[0]
+	if entry.Action != "auth.token_refresh" {
+		t.Errorf("audit action = %q, want %q", entry.Action, "auth.token_refresh")
+	}
+	if entry.Result != entity.AuditResultSuccess {
+		t.Errorf("audit result = %q, want %q", entry.Result, entity.AuditResultSuccess)
+	}
+	if entry.ActorID == nil || *entry.ActorID != u.ID {
+		t.Errorf("audit actor_id = %v, want %q", entry.ActorID, u.ID)
+	}
+	if entry.ResourceID == nil || *entry.ResourceID != login.SessionID {
+		t.Errorf("audit resource_id = %v, want %q", entry.ResourceID, login.SessionID)
+	}
+	for k, v := range entry.Metadata {
+		if s, ok := v.(string); ok && strings.Contains(s, result.RefreshToken) {
+			t.Errorf("audit metadata[%q] = %q contains the raw refresh token", k, s)
+		}
+	}
+}
+
+// TestRefreshToken_RecordsAuditEventOnFailure mirrors
+// TestLogin_RecordsAuditEventOnFailure's never-carries-a-secret
+// requirement for RefreshToken's own failure branch.
+func TestRefreshToken_RecordsAuditEventOnFailure(t *testing.T) {
+	svc, _, _, _, audit := newTestAuthService(t)
+	const bogusToken = "this-refresh-token-was-never-issued"
+
+	if _, err := svc.RefreshToken(t.Context(), bogusToken, LoginMeta{}); !errors.Is(err, entity.ErrTokenExpired) {
+		t.Fatalf("RefreshToken() with an unknown token, error = %v, want entity.ErrTokenExpired", err)
+	}
+
+	if len(audit.Entries) != 1 {
+		t.Fatalf("audit_logs has %d entries after a failed refresh, want 1", len(audit.Entries))
+	}
+	entry := audit.Entries[0]
+	if entry.Result != entity.AuditResultFailure {
+		t.Errorf("audit result = %q, want %q", entry.Result, entity.AuditResultFailure)
+	}
+	for k, v := range entry.Metadata {
+		if s, ok := v.(string); ok && strings.Contains(s, bogusToken) {
+			t.Errorf("audit metadata[%q] = %q contains the raw refresh token", k, s)
+		}
 	}
 }

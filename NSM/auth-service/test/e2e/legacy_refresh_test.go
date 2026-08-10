@@ -38,13 +38,13 @@ import (
 //  2. No Redis-backed rate limiting at all — AuthServiceDeps.RefreshToken
 //     never touches AbuseProtection (unlike RefreshTokenService.Refresh's
 //     own IP-scoped pre-check).
-//  3. No audit_logs row at all — the same missing-audit-write pattern
-//     AuthService.Logout had before it was fixed (see
-//     service.AuthService.recordLogoutAudit's own history): RefreshToken
-//     never calls AuditTx. This is a real, current gap, documented and
-//     tested for directly below rather than silently assumed away or
-//     fixed here — this task is scoped to wiring coverage, not to fixing
-//     what that coverage finds.
+//  3. Audit logging — a real gap this suite found (RefreshToken wrote no
+//     audit_logs row at all, the same missing-audit-write pattern
+//     AuthService.Logout had before it was fixed) has since been fixed:
+//     see service.AuthService.recordRefreshAudit, which uses the same
+//     "auth.token_refresh" action name RefreshTokenService.recordRefreshAudit
+//     already uses for the Milestone 5B flow. AuditEvents below now
+//     verifies the real, current behavior.
 
 // doLegacyRefresh sends a real POST /v1/auth/token/refresh.
 func doLegacyRefresh(t *testing.T, env *e2eEnv, rawToken string) (resp *http.Response, out dto.TokenResponse, raw []byte) {
@@ -62,8 +62,8 @@ func doLegacyRefresh(t *testing.T, env *e2eEnv, rawToken string) (resp *http.Res
 // core narrative against the legacy endpoint: Login -> Refresh Token A ->
 // POST /v1/auth/token/refresh -> Refresh Token B -> Token A replayed ->
 // replay detected -> Token B (an unused, otherwise legitimate descendant)
-// also invalidated by family-wide revocation -> session revoked -> (the
-// real, documented difference) no audit_logs row exists for any of it.
+// also invalidated by family-wide revocation -> session revoked -> a real
+// auth.token_refresh audit trail exists for the attempts, in real Postgres.
 func TestE2E_LegacyRefreshTokenRotationAndReplayDetection(t *testing.T) {
 	env := newE2EEnv(t)
 	userID, _, refreshTokenA, sessionID := registerAndLogin(t, env)
@@ -184,24 +184,32 @@ func TestE2E_LegacyRefreshTokenRotationAndReplayDetection(t *testing.T) {
 		}
 	})
 
-	// The real, documented finding: this endpoint writes no audit trail.
-	// If that changes, this assertion must be updated to match, not
-	// deleted — see this file's own top-level doc comment.
-	t.Run("AuditEvents_NoneRecordedByThisEndpoint", func(t *testing.T) {
-		rows, err := env.DB.Query(`SELECT count(*) FROM audit_logs WHERE action = 'auth.token_refresh' AND resource_id = $1`, sessionID)
-		if err != nil {
-			t.Fatalf("query audit_logs: %v", err)
+	// Audit logging was a real, missing-write gap this suite found; it has
+	// since been fixed (service.AuthService.recordRefreshAudit) — this now
+	// verifies the real, current behavior against real Postgres JSONB,
+	// reusing the same assertAuditLogsClean helper
+	// refresh_rotation_replay_test.go's own AuditEvents subtest uses (both
+	// endpoints share the "auth.token_refresh" action name).
+	t.Run("AuditEvents", func(t *testing.T) {
+		entries := assertAuditLogsClean(t, env, sessionID, refreshTokenA, refreshTokenB, accessTokenB)
+		if len(entries) == 0 {
+			t.Fatal("no auth.token_refresh audit entries were recorded")
 		}
-		defer rows.Close()
-		var count int
-		if rows.Next() {
-			if err := rows.Scan(&count); err != nil {
-				t.Fatalf("scan count: %v", err)
+		found := false
+		for _, e := range entries {
+			if e.Result != "success" {
+				continue
+			}
+			found = true
+			if !e.ActorID.Valid {
+				t.Error("success audit entry has no actor_id")
+			}
+			if !e.ResourceID.Valid || e.ResourceID.String != sessionID {
+				t.Errorf("audit entry resource_id = %v, want %q", e.ResourceID, sessionID)
 			}
 		}
-		if count != 0 {
-			t.Errorf("auth.token_refresh audit entries for this session = %d, want 0 (AuthService.RefreshToken does not audit-log today) — "+
-				"if audit logging was intentionally added, update this assertion to match, don't just delete it", count)
+		if !found {
+			t.Error("no successful auth.token_refresh audit entry was recorded")
 		}
 	})
 }
