@@ -14,8 +14,9 @@ import "context"
 // authentication endpoints add a new constant here and a matching Config
 // entry, never a new method on AuthAbuseProtection.
 const (
-	OperationLogin   = "login"
-	OperationRefresh = "refresh"
+	OperationLogin     = "login"
+	OperationRefresh   = "refresh"
+	OperationBootstrap = "bootstrap"
 )
 
 // Dimensions identifies the independent axes an authentication attempt is

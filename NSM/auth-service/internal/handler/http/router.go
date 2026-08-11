@@ -23,6 +23,10 @@ type RouterDeps struct {
 	// see logout_handler.go's doc comment for why it's a separate route
 	// from AuthService's own POST /v1/auth/logout.
 	LogoutService *service.LogoutService
+	// BootstrapService backs GET /v1/platform/status and
+	// POST /v1/platform/bootstrap (Sprint 2.6) — the one-time
+	// first-administrator setup flow.
+	BootstrapService *service.BootstrapService
 	TokenAuth     *util.JWTSigner
 	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
 	// (Milestone 6A) — the first route in this router to actually require
@@ -56,10 +60,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 	users := &userHandler{svc: deps.UserService}
 	refresh := &refreshHandler{svc: deps.RefreshTokenService}
 	logout := &logoutHandler{svc: deps.LogoutService}
+	platform := &platformHandler{svc: deps.BootstrapService}
 	requireAuth := middleware.Auth(deps.TokenAuth)
 	requireAccessToken := middleware.Authenticate(deps.AccessTokens, deps.AccessTokenAudience)
 
 	mux.HandleFunc("GET /healthz", healthCheck)
+
+	// --- platform bootstrap: unauthenticated by construction (see
+	// platform_handler.go) — a caller who could authenticate wouldn't
+	// need this endpoint at all ---
+	mux.HandleFunc("GET /v1/platform/status", platform.status)
+	mux.HandleFunc("POST /v1/platform/bootstrap", platform.bootstrap)
 
 	// --- public: no bearer token exists yet at this point in the flow ---
 	mux.HandleFunc("POST /v1/auth/login", auth.login)

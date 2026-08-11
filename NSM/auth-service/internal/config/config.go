@@ -183,9 +183,10 @@ type RateLimitConfig struct {
 	// Retry-After header — deliberately not derived from any dimension's
 	// actual remaining block time, so the header itself never reveals
 	// which dimension triggered or how close to expiry a block is.
-	RetryAfter time.Duration          `mapstructure:"retry_after"`
-	Login      LoginRateLimitConfig   `mapstructure:"login"`
-	Refresh    RefreshRateLimitConfig `mapstructure:"refresh"`
+	RetryAfter time.Duration            `mapstructure:"retry_after"`
+	Login      LoginRateLimitConfig     `mapstructure:"login"`
+	Refresh    RefreshRateLimitConfig   `mapstructure:"refresh"`
+	Bootstrap  BootstrapRateLimitConfig `mapstructure:"bootstrap"`
 }
 
 // LoginRateLimitConfig holds POST /auth/login's three dimensions — IP,
@@ -206,6 +207,20 @@ type LoginRateLimitConfig struct {
 // high-entropy secret, not a guessable credential, so there is no account
 // dimension to rate-limit before the token has even resolved to a user.
 type RefreshRateLimitConfig struct {
+	IPWindow      time.Duration `mapstructure:"ip_window"`
+	IPLimit       int64         `mapstructure:"ip_limit"`
+	BlockDuration time.Duration `mapstructure:"block_duration"`
+}
+
+// BootstrapRateLimitConfig holds POST /platform/bootstrap's one
+// dimension — IP only, the same reasoning RefreshRateLimitConfig's own
+// doc comment gives: there is no account to rate-limit against yet, since
+// this endpoint's entire job is creating the platform's first one. The
+// defaults are deliberately far stricter than login's (see setDefaults) —
+// this endpoint creates the most privileged account the platform will
+// ever have, and legitimate traffic against it is, at most, a handful of
+// requests during initial setup.
+type BootstrapRateLimitConfig struct {
 	IPWindow      time.Duration `mapstructure:"ip_window"`
 	IPLimit       int64         `mapstructure:"ip_limit"`
 	BlockDuration time.Duration `mapstructure:"block_duration"`
@@ -365,6 +380,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rate_limit.refresh.ip_limit", 30)
 	v.SetDefault("rate_limit.refresh.block_duration", 15*time.Minute)
 
+	v.SetDefault("rate_limit.bootstrap.ip_window", 1*time.Hour)
+	v.SetDefault("rate_limit.bootstrap.ip_limit", 5)
+	v.SetDefault("rate_limit.bootstrap.block_duration", 1*time.Hour)
+
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 }
@@ -446,6 +465,7 @@ func (c Config) Validate() error {
 			{"rate_limit.login.account", c.RateLimit.Login.AccountWindow, c.RateLimit.Login.AccountLimit},
 			{"rate_limit.login.pair", c.RateLimit.Login.PairWindow, c.RateLimit.Login.PairLimit},
 			{"rate_limit.refresh.ip", c.RateLimit.Refresh.IPWindow, c.RateLimit.Refresh.IPLimit},
+			{"rate_limit.bootstrap.ip", c.RateLimit.Bootstrap.IPWindow, c.RateLimit.Bootstrap.IPLimit},
 		} {
 			if l.d <= 0 {
 				errs = append(errs, l.field+"_window must be positive")
@@ -459,6 +479,9 @@ func (c Config) Validate() error {
 		}
 		if c.RateLimit.Refresh.BlockDuration <= 0 {
 			errs = append(errs, "rate_limit.refresh.block_duration must be positive")
+		}
+		if c.RateLimit.Bootstrap.BlockDuration <= 0 {
+			errs = append(errs, "rate_limit.bootstrap.block_duration must be positive")
 		}
 	}
 

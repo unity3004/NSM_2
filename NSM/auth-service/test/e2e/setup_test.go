@@ -120,6 +120,17 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 			return fn(postgres.NewAuditLogRepository(tx))
 		})
 	}
+	bootstrapTx := func(ctx context.Context, fn func(repository.PlatformBootstrapRepository, repository.OrganizationRepository, repository.UserRepository, repository.AuditLogRepository) error) error {
+		return database.WithTx(ctx, db, func(tx *sql.Tx) error {
+			return fn(
+				postgres.NewPlatformBootstrapRepository(tx),
+				postgres.NewOrganizationRepository(tx),
+				postgres.NewUserRepository(tx),
+				postgres.NewAuditLogRepository(tx),
+			)
+		})
+	}
+	platformStatusRepo := postgres.NewPlatformBootstrapRepository(db)
 
 	tokenSigner := util.NewJWTSigner(cfg.JWT.SigningKey, cfg.JWT.AccessTokenTTL)
 	passwordSvc := security.NewPasswordService(security.DefaultParams)
@@ -148,6 +159,9 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 				},
 				ratelimit.OperationRefresh: {
 					IP: &ratelimit.DimensionPolicy{Window: cfg.RateLimit.Refresh.IPWindow, Limit: cfg.RateLimit.Refresh.IPLimit, BlockDuration: cfg.RateLimit.Refresh.BlockDuration},
+				},
+				ratelimit.OperationBootstrap: {
+					IP: &ratelimit.DimensionPolicy{Window: cfg.RateLimit.Bootstrap.IPWindow, Limit: cfg.RateLimit.Bootstrap.IPLimit, BlockDuration: cfg.RateLimit.Bootstrap.BlockDuration},
 				},
 			},
 		})
@@ -188,12 +202,21 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		Sessions: sessionSvc,
 		AuditTx:  loginAuditTx,
 	})
+	bootstrapSvc := service.NewBootstrapService(
+		passwordSvc,
+		platformStatusRepo,
+		bootstrapTx,
+		loginAuditTx,
+		abuseProtection,
+		cfg.RateLimit.RetryAfter,
+	)
 
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,
 		UserService:         userSvc,
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
+		BootstrapService:    bootstrapSvc,
 		TokenAuth:           tokenSigner,
 		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,

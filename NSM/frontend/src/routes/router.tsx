@@ -3,13 +3,17 @@ import { ProtectedRoute } from "@/routes/ProtectedRoute"
 import { PublicRoute } from "@/routes/PublicRoute"
 import { AppLayout } from "@/layouts/AppLayout"
 import { LoginPage } from "@/pages/LoginPage"
+import { SetupPage } from "@/pages/SetupPage"
 import { DashboardPage } from "@/pages/DashboardPage"
 
 export const router = createBrowserRouter([
   { path: "/", element: <Navigate to="/dashboard" replace /> },
   {
     element: <PublicRoute />,
-    children: [{ path: "/login", element: <LoginPage /> }],
+    children: [
+      { path: "/login", element: <LoginPage /> },
+      { path: "/setup", element: <SetupPage /> },
+    ],
   },
   {
     element: <ProtectedRoute />,

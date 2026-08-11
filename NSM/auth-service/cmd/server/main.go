@@ -102,6 +102,31 @@ func main() {
 		})
 	}
 
+	// bootstrapTx is service.BootstrapTxFunc's wiring point — every
+	// repository BootstrapService.Bootstrap touches (the singleton
+	// platform_bootstrap row, an organization, a user, and the audit
+	// chain) constructed against the same *sql.Tx, so
+	// PlatformBootstrapRepository.LockForBootstrap's row lock actually
+	// serializes concurrent callers the way its doc comment describes —
+	// exactly the same requirement registerTx and loginAuditTx above
+	// already exist to satisfy for their own repositories.
+	bootstrapTx := func(ctx context.Context, fn func(repository.PlatformBootstrapRepository, repository.OrganizationRepository, repository.UserRepository, repository.AuditLogRepository) error) error {
+		return database.WithTx(ctx, db, func(tx *sql.Tx) error {
+			return fn(
+				postgres.NewPlatformBootstrapRepository(tx),
+				postgres.NewOrganizationRepository(tx),
+				postgres.NewUserRepository(tx),
+				postgres.NewAuditLogRepository(tx),
+			)
+		})
+	}
+	// platformStatusRepo is BootstrapService's non-transactional
+	// dependency for GET /v1/platform/status — see
+	// BootstrapService.Initialized's doc comment for why that read must
+	// never go through bootstrapTx (it would block behind a concurrent
+	// bootstrap attempt's row lock).
+	platformStatusRepo := postgres.NewPlatformBootstrapRepository(db)
+
 	// --- shared infrastructure utilities ---
 	tokenSigner := util.NewJWTSigner(cfg.JWT.SigningKey, cfg.JWT.AccessTokenTTL)
 	// One PasswordService instance, shared by both services below, so
@@ -158,6 +183,13 @@ func main() {
 						Window: cfg.RateLimit.Refresh.IPWindow, Limit: cfg.RateLimit.Refresh.IPLimit, BlockDuration: cfg.RateLimit.Refresh.BlockDuration,
 					},
 				},
+				// Bootstrap is IP-only for the same reason Refresh is —
+				// see BootstrapRateLimitConfig's doc comment.
+				ratelimit.OperationBootstrap: {
+					IP: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.Bootstrap.IPWindow, Limit: cfg.RateLimit.Bootstrap.IPLimit, BlockDuration: cfg.RateLimit.Bootstrap.BlockDuration,
+					},
+				},
 			},
 		})
 	}
@@ -192,6 +224,14 @@ func main() {
 		Sessions: sessionSvc,
 		AuditTx:  loginAuditTx,
 	})
+	bootstrapSvc := service.NewBootstrapService(
+		passwordSvc,
+		platformStatusRepo,
+		bootstrapTx,
+		loginAuditTx,
+		abuseProtection,
+		cfg.RateLimit.RetryAfter,
+	)
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
@@ -199,6 +239,7 @@ func main() {
 		UserService:         userSvc,
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
+		BootstrapService:    bootstrapSvc,
 		TokenAuth:           tokenSigner,
 		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
