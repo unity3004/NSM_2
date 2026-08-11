@@ -108,6 +108,18 @@ function getOrStartRefresh(): Promise<TokenResponse> {
  * Never call fetch directly from a component or feature hook — see this
  * file's own role in the architecture: authentication, refresh-on-401,
  * and error normalization all happen exactly once, here.
+ *
+ * A 401 on *any* method (including POST/PATCH/DELETE) triggers exactly one
+ * refresh-then-retry of the original request — see below. Every endpoint
+ * wrapper that exists today (services/*Api.ts) is safe to retry this way:
+ * GETs are naturally idempotent, and the one non-GET on the authenticated
+ * path — POST /v1/auth/logout — is idempotent in effect (retrying it after
+ * a refresh still just ends the session). This is not a general guarantee,
+ * though: a future non-idempotent write (e.g. a secrets-creation POST)
+ * retried transparently here after a refresh could double-submit. Give
+ * that endpoint its own opt-out (e.g. an `idempotent` RequestOption
+ * defaulting appropriately) before wiring it through this client, rather
+ * than assuming this function already handles it.
  */
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const res = await rawRequest(path, options)

@@ -1,38 +1,52 @@
-import { useState, type FormEvent } from "react"
+import { useRef, useState, type FormEvent } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useLogin } from "@/features/auth/useLogin"
 import { ApiError } from "@/lib/apiError"
+import { friendlyErrorMessage } from "@/lib/errorMessage"
 
 /**
  * Friendly, deliberately non-enumerating copy — preserves the backend's own
  * anti-enumeration design (INVALID_CREDENTIALS never distinguishes "no such
  * user" from "wrong password"; see AuthService.Login). This mapping must
  * not "help" by being more specific than the backend already chose to be.
+ * Only the login-specific case (wrong credentials) needs copy of its own;
+ * everything else (locked, rate-limited, validation, network, 5xx) falls
+ * through to the app-wide mapping in lib/errorMessage.ts so this form
+ * doesn't maintain its own duplicate copy of generic error text.
  */
 function friendlyLoginError(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.isInvalidCredentials) return "Incorrect email or password."
-    if (error.isAccountLocked) {
-      return "This account is temporarily locked after repeated failed attempts. Try again later."
-    }
-    if (error.isRateLimited) return "Too many attempts. Please wait a moment and try again."
-    if (error.code === "VALIDATION_ERROR") return "Please check the highlighted fields."
-    if (error.code === "NETWORK_ERROR") return error.message
+  if (error instanceof ApiError && error.isInvalidCredentials) {
+    return "Incorrect email or password."
   }
-  return "Something went wrong. Please try again."
+  return friendlyErrorMessage(error)
 }
 
 export function LoginForm() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const login = useLogin()
+  // A ref, not login.isPending: isPending is React state, which only
+  // updates on the next render. Two submits dispatched in the same tick
+  // (e.g. a double-click, or Enter auto-repeating) both run handleSubmit
+  // before React ever re-renders, so both would read the same stale
+  // `false` and both call mutate() — confirmed by a real duplicate-submit
+  // test against the live backend before this ref was added. A ref
+  // mutates synchronously and is visible to the very next call in the
+  // same tick, which is what actually closes the gap the disabled button
+  // alone cannot.
+  const submitting = useRef(false)
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
-    login.mutate({ email, password })
+    if (submitting.current) return
+    submitting.current = true
+    login.mutate(
+      { email, password },
+      { onSettled: () => { submitting.current = false } },
+    )
   }
 
   const fieldErrors = new Map<string, string>()

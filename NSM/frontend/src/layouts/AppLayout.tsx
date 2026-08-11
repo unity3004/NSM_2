@@ -103,10 +103,18 @@ export function AppLayout() {
                 <DropdownMenuItem
                   variant="destructive"
                   disabled={logout.isPending}
-                  onSelect={() => logout.mutate()}
+                  onSelect={(event) => {
+                    // Radix closes the menu (and would unmount this item)
+                    // on select by default; the mutation itself is
+                    // unaffected either way, but preventing the default
+                    // keeps "Logging out…" visible on this item instead of
+                    // the menu vanishing mid-request.
+                    event.preventDefault()
+                    logout.mutate()
+                  }}
                 >
                   <LogOut />
-                  Log out
+                  {logout.isPending ? "Logging out…" : "Log out"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
