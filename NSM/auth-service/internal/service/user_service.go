@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -36,34 +37,60 @@ type RegistrationTxFunc func(ctx context.Context, fn func(repository.UserReposit
 
 type UserService struct {
 	users      repository.UserRepository
+	sessions   repository.SessionRepository
 	passwords  *security.PasswordService
 	registerTx RegistrationTxFunc
+	// auditTx backs every admin-initiated action's audit event
+	// (user.created, user.disabled, user.enabled, role.assigned,
+	// role.removed) — best-effort, logged-and-swallowed on failure, the
+	// same AuditTxFunc pattern AuthService/RefreshTokenService/LogoutService
+	// already use for their own audit writes, rather than the harder
+	// same-transaction guarantee Register/BootstrapService make for their
+	// own single, one-time creation events. May be nil, the same
+	// allowance every other AuditTx dependency in this codebase makes.
+	auditTx AuditTxFunc
 }
 
 // NewUserService's registerTx may be nil if the binary wiring it up never
 // calls Register (e.g. a future admin-only build) — every other method
 // only needs users/passwords, unchanged from before this milestone.
-func NewUserService(users repository.UserRepository, passwords *security.PasswordService, registerTx RegistrationTxFunc) *UserService {
-	return &UserService{users: users, passwords: passwords, registerTx: registerTx}
+func NewUserService(users repository.UserRepository, sessions repository.SessionRepository, passwords *security.PasswordService, registerTx RegistrationTxFunc, auditTx AuditTxFunc) *UserService {
+	return &UserService{users: users, sessions: sessions, passwords: passwords, registerTx: registerTx, auditTx: auditTx}
+}
+
+// CreateUserInput is CreateUser's argument — the admin/invite path
+// (POST /v1/users), distinct from RegisterInput's self-service path even
+// though both end up hashing a password through the same PasswordService
+// and calling the same UserRepository.Create. ActorUserID/IPAddress exist
+// only to attribute the resulting "user.created" audit event; neither
+// reaches entity.User or any password-handling code.
+type CreateUserInput struct {
+	User              *entity.User
+	PlaintextPassword *string
+	ActorUserID       string
+	IPAddress         string
 }
 
 // CreateUser hashes the password (if any — an SSO-only account has none)
 // before it ever reaches the repository, so no repository implementation
 // can accidentally persist a plaintext one.
-func (s *UserService) CreateUser(ctx context.Context, u *entity.User, plaintextPassword *string) (*entity.User, error) {
-	if plaintextPassword != nil {
-		hash, err := s.passwords.Hash(*plaintextPassword)
+func (s *UserService) CreateUser(ctx context.Context, in CreateUserInput) (*entity.User, error) {
+	if in.PlaintextPassword != nil {
+		hash, err := s.passwords.Hash(*in.PlaintextPassword)
 		if err != nil {
 			return nil, err
 		}
 		algo := passwordAlgoArgon2id
-		u.PasswordHash = &hash
-		u.PasswordAlgo = &algo
+		in.User.PasswordHash = &hash
+		in.User.PasswordAlgo = &algo
 	}
-	if err := s.users.Create(ctx, u); err != nil {
+	if err := s.users.Create(ctx, in.User); err != nil {
 		return nil, err
 	}
-	return u, nil
+	s.recordUserAudit(ctx, "user.created", in.ActorUserID, in.User.ID, in.IPAddress, map[string]any{
+		"email": in.User.Email,
+	})
+	return in.User, nil
 }
 
 func (s *UserService) GetUser(ctx context.Context, id string) (*entity.User, error) {
@@ -80,6 +107,120 @@ func (s *UserService) UpdateUser(ctx context.Context, u *entity.User) error {
 
 func (s *UserService) DeleteUser(ctx context.Context, id string) error {
 	return s.users.SoftDelete(ctx, id)
+}
+
+// DisableUser sets status to Disabled and revokes every one of the
+// user's currently active sessions (reusing SessionRepository.RevokeAllForUser
+// as-is — no new revocation mechanism). This is what actually stops
+// further access, immediately: AuthService.Login already rejects a
+// Disabled account outright (entity.ErrAccountDisabled), and
+// RefreshTokenService.Refresh checks the session's live state before
+// rotating, so a revoked session can never be used to mint a new access
+// token either. The one thing this does *not* revoke is an access token
+// already issued before the disable — see this method's own doc comment
+// in the final report for why that is a real, already-documented
+// characteristic of this service's stateless-JWT access tokens (15-minute
+// default TTL), not something disabling a user is expected to reach back
+// in time and undo.
+func (s *UserService) DisableUser(ctx context.Context, userID, actorUserID, ipAddress string) error {
+	u, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	u.Status = entity.UserStatusDisabled
+	if err := s.users.Update(ctx, u); err != nil {
+		return err
+	}
+	if err := s.sessions.RevokeAllForUser(ctx, userID, entity.RevocationAdminRevoked); err != nil {
+		// Best-effort: the account is already disabled (Login already
+		// rejects it), so a failure here narrows to "an existing refresh
+		// token could still rotate until it separately expires" rather
+		// than "the account can still be used to log in" — worth an
+		// Error log, not a reason to report the whole operation failed
+		// when the status change itself already succeeded.
+		logging.FromContext(ctx).Error("failed to revoke sessions after disabling user",
+			zap.String("user_id", userID), zap.Error(err))
+	}
+	s.recordUserAudit(ctx, "user.disabled", actorUserID, userID, ipAddress, nil)
+	return nil
+}
+
+// EnableUser reverses DisableUser's status change. It does not, and
+// cannot, restore sessions DisableUser revoked — a re-enabled user logs
+// in again like any account establishing a new session, never resumes an
+// old one.
+func (s *UserService) EnableUser(ctx context.Context, userID, actorUserID, ipAddress string) error {
+	u, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	u.Status = entity.UserStatusActive
+	if err := s.users.Update(ctx, u); err != nil {
+		return err
+	}
+	s.recordUserAudit(ctx, "user.enabled", actorUserID, userID, ipAddress, nil)
+	return nil
+}
+
+// AssignRole grants roleID to userID, reusing UserRepository.GrantRole
+// exactly as bootstrap's own role grant does — no second role-assignment
+// code path. actorUserID is recorded as both the audit actor and
+// user_roles.assigned_by (entity.UserRole.AssignedBy), the same "who
+// performed this" provenance every other grant already carries.
+func (s *UserService) AssignRole(ctx context.Context, userID, roleID, actorUserID, ipAddress string, expiresAt *time.Time) error {
+	grant := &entity.UserRole{UserID: userID, RoleID: roleID, AssignedBy: &actorUserID, ExpiresAt: expiresAt}
+	if err := s.users.GrantRole(ctx, grant); err != nil {
+		return err
+	}
+	s.recordUserAudit(ctx, "role.assigned", actorUserID, userID, ipAddress, map[string]any{"role_id": roleID})
+	return nil
+}
+
+// RemoveRole revokes roleID from userID.
+func (s *UserService) RemoveRole(ctx context.Context, userID, roleID, actorUserID, ipAddress string) error {
+	if err := s.users.RevokeRole(ctx, userID, roleID); err != nil {
+		return err
+	}
+	s.recordUserAudit(ctx, "role.removed", actorUserID, userID, ipAddress, map[string]any{"role_id": roleID})
+	return nil
+}
+
+// ListUserRoles returns userID's current (non-expired) direct role
+// grants — a thin pass-through to UserRepository.ListRoles, kept on this
+// service so handlers never call a repository directly.
+func (s *UserService) ListUserRoles(ctx context.Context, userID string) ([]*entity.UserRole, error) {
+	return s.users.ListRoles(ctx, userID)
+}
+
+// recordUserAudit is best-effort and never surfaces a failure to the
+// caller — the same convention every other audit write in this codebase
+// follows (see AuthService.recordLoginAudit). metadata may be nil for
+// actions (disable/enable) that need no extra context beyond actor,
+// action, and resource.
+func (s *UserService) recordUserAudit(ctx context.Context, action, actorUserID, targetUserID, ipAddress string, metadata map[string]any) {
+	if s.auditTx == nil {
+		return
+	}
+	var actorID *string
+	if actorUserID != "" {
+		actorID = &actorUserID
+	}
+	err := s.auditTx(ctx, func(audit repository.AuditLogRepository) error {
+		return audit.Append(ctx, &entity.AuditLogEntry{
+			ActorType:    entity.AuditActorUser,
+			ActorID:      actorID,
+			Action:       action,
+			ResourceType: strPtr("user"),
+			ResourceID:   strPtr(targetUserID),
+			Result:       entity.AuditResultSuccess,
+			IPAddress:    strPtr(ipAddress),
+			Metadata:     metadata,
+		})
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record audit event",
+			zap.String("action", action), zap.Error(err))
+	}
 }
 
 // RegisterInput is Register's argument — deliberately its own type rather

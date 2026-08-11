@@ -449,6 +449,29 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string, meta Lo
 		return nil, refreshErr
 	}
 
+	// Session lifetime takes precedence over the refresh token's own
+	// expiry — a token that is individually still valid must still be
+	// rejected once its session is not, the same rule
+	// RefreshTokenService.Refresh already enforces via
+	// SessionService.ValidateSession (see that method's identical check).
+	// Without this, UserService.DisableUser's session revocation
+	// (RevokeAllForUser) would have no actual effect on this legacy
+	// refresh path: a disabled user's already-issued refresh token could
+	// keep minting new access tokens indefinitely, since nothing here
+	// previously looked at session state at all — confirmed for real by
+	// TestUserManagement_FullLifecycle before this check was added.
+	session, err := s.deps.Sessions.GetByID(ctx, current.SessionID)
+	if err != nil {
+		failureReason = "session_not_found"
+		refreshErr = entity.ErrTokenExpired
+		return nil, refreshErr
+	}
+	if session.RevokedAt != nil || !session.ExpiresAt.After(now) {
+		failureReason = "session_invalid"
+		refreshErr = entity.ErrTokenExpired
+		return nil, refreshErr
+	}
+
 	nextRaw, err := util.NewOpaqueToken()
 	if err != nil {
 		refreshErr = err

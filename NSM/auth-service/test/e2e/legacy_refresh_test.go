@@ -26,15 +26,22 @@ import (
 // source for the shared mechanism. It focuses on what's real, observed, and
 // different, found by inspection rather than assumed:
 //
-//  1. No session-validity check during rotation. RefreshTokenService.Refresh
+//  1. Session-validity check during rotation. RefreshTokenService.Refresh
 //     calls SessionService.ValidateSession before rotating (proven by
 //     refresh_rotation_replay_test.go's logout-then-refresh scenarios,
-//     transitively); AuthService.RefreshToken never does — it only checks
-//     the *token's own* revoked/expired state. A session an administrator
-//     force-revokes independently of its refresh tokens does not stop this
-//     endpoint from minting a fresh access token from an as-yet-unrevoked
-//     refresh token. TestE2E_LegacyRefreshToken_NoSessionValidityCheck
-//     proves this directly rather than asserting the opposite.
+//     transitively); AuthService.RefreshToken did not — it only checked the
+//     *token's own* revoked/expired state, so a session an administrator
+//     force-revoked independently of its refresh tokens (e.g.
+//     UserService.DisableUser's RevokeAllForUser call, Sprint 2.7) did not
+//     stop this endpoint from minting a fresh access token from an
+//     as-yet-unrevoked refresh token. Found for real by
+//     TestUserManagement_FullLifecycle (user_role_management_test.go)
+//     exercising a real disable-then-refresh sequence against the live
+//     endpoint, and fixed the same way RefreshTokenService.Refresh already
+//     did it: AuthService.RefreshToken now fetches the session and rejects
+//     with TOKEN_EXPIRED if it is revoked or expired, before rotating.
+//     TestE2E_LegacyRefreshToken_SessionValidityEnforced proves the fixed
+//     behavior directly.
 //  2. No Redis-backed rate limiting at all — AuthServiceDeps.RefreshToken
 //     never touches AbuseProtection (unlike RefreshTokenService.Refresh's
 //     own IP-scoped pre-check).
@@ -214,15 +221,16 @@ func TestE2E_LegacyRefreshTokenRotationAndReplayDetection(t *testing.T) {
 	})
 }
 
-// TestE2E_LegacyRefreshToken_NoSessionValidityCheck proves, rather than
-// assumes, the real behavioral gap documented in this file's top-level
-// comment: a session revoked independently of its refresh tokens (e.g. an
-// administrator force-revoking it) does not stop this endpoint from
-// minting a fresh access token from an as-yet-unrevoked refresh token.
-// The session state is arranged directly via real SQL — a legitimate test
-// precondition, not a bypassed check — and the actual rejection/acceptance
-// decision is still made by the real HTTP endpoint.
-func TestE2E_LegacyRefreshToken_NoSessionValidityCheck(t *testing.T) {
+// TestE2E_LegacyRefreshToken_SessionValidityEnforced proves the fixed
+// behavior documented in this file's top-level comment: a session revoked
+// independently of its refresh tokens (e.g. an administrator disabling the
+// user, or force-revoking the session directly) now stops this endpoint
+// from minting a fresh access token, exactly like RefreshTokenService.Refresh
+// already enforced. The session state is arranged directly via real SQL —
+// a legitimate test precondition standing in for UserService.DisableUser's
+// real effect, not a bypassed check — and the actual rejection decision is
+// still made by the real HTTP endpoint.
+func TestE2E_LegacyRefreshToken_SessionValidityEnforced(t *testing.T) {
 	env := newE2EEnv(t)
 	_, _, refreshToken, sessionID := registerAndLogin(t, env)
 
@@ -234,14 +242,17 @@ func TestE2E_LegacyRefreshToken_NoSessionValidityCheck(t *testing.T) {
 		t.Fatal("test setup failed: session was not actually revoked")
 	}
 
-	resp, out, raw := doLegacyRefresh(t, env, refreshToken)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/auth/token/refresh with a token whose session is independently revoked: status = %d, want %d "+
-			"(this endpoint does not check session validity — if that changed, update this test to match); body = %s",
-			resp.StatusCode, http.StatusOK, raw)
+	resp, _, raw := doLegacyRefresh(t, env, refreshToken)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /v1/auth/token/refresh with a token whose session is independently revoked: status = %d, want %d; body = %s",
+			resp.StatusCode, http.StatusUnauthorized, raw)
 	}
-	if out.AccessToken == "" || out.RefreshToken == "" {
-		t.Error("expected a full TokenResponse despite the revoked session")
+	var errOut dto.Error
+	if err := json.Unmarshal(raw, &errOut); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if errOut.Error.Code != dto.CodeTokenExpired {
+		t.Errorf("error code = %q, want %q", errOut.Error.Code, dto.CodeTokenExpired)
 	}
 }
 

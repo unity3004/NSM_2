@@ -1,4 +1,4 @@
-import { Outlet } from "react-router-dom"
+import { Link, Outlet, useLocation } from "react-router-dom"
 import {
   Sidebar,
   SidebarContent,
@@ -22,25 +22,55 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { LayoutDashboard, KeyRound, Users, ScrollText, LogOut } from "lucide-react"
+import {
+  LayoutDashboard,
+  KeyRound,
+  Users as UsersIcon,
+  ShieldCheck as RolesIcon,
+  ScrollText,
+  Settings as SettingsIcon,
+  LogOut,
+} from "lucide-react"
 import { useCurrentUser } from "@/features/users/useCurrentUser"
 import { useLogout } from "@/features/auth/useLogout"
 import { Brand } from "@/components/Brand"
+
+// Real routes, gated by what the real backend told us the current user
+// can actually do (see useCurrentUser -> GET /v1/users/{id}'s effective
+// permissions) — this is advisory UX only, never the enforcement: a user
+// without users:read who navigates to /users directly still gets a real
+// 403 from GET /v1/users, which that page's own isError state renders as
+// an access-denied message. Hiding the link just avoids pointing someone
+// at a page the backend is only ever going to refuse.
+const navItems = [
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, permission: null },
+  { to: "/users", label: "Users", icon: UsersIcon, permission: "users:read" },
+  { to: "/roles", label: "Roles", icon: RolesIcon, permission: "roles:read" },
+] as const
 
 // Shown but disabled — the sidebar's information architecture is honest
 // about what this product will eventually cover without pretending these
 // surfaces are built yet.
 const futureNavItems = [
   { label: "Secrets", icon: KeyRound },
-  { label: "Access", icon: Users },
-  { label: "Audit", icon: ScrollText },
+  { label: "Audit Logs", icon: ScrollText },
+  { label: "Settings", icon: SettingsIcon },
 ]
+
+const pageTitles: Record<string, string> = {
+  "/dashboard": "Dashboard",
+  "/users": "Users",
+  "/roles": "Roles",
+}
 
 export function AppLayout() {
   const { data: user } = useCurrentUser()
   const logout = useLogout()
+  const location = useLocation()
 
   const initials = user?.email ? user.email.slice(0, 2).toUpperCase() : "?"
+  const permissionNames = new Set((user?.permissions ?? []).map((p) => p.name))
+  const title = pageTitles[location.pathname] ?? "Dashboard"
 
   return (
     <SidebarProvider>
@@ -52,12 +82,18 @@ export function AppLayout() {
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>
-                <SidebarMenuItem>
-                  <SidebarMenuButton isActive tooltip="Dashboard">
-                    <LayoutDashboard />
-                    <span>Dashboard</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
+                {navItems
+                  .filter((item) => item.permission === null || permissionNames.has(item.permission))
+                  .map((item) => (
+                    <SidebarMenuItem key={item.to}>
+                      <SidebarMenuButton asChild isActive={location.pathname === item.to} tooltip={item.label}>
+                        <Link to={item.to}>
+                          <item.icon />
+                          <span>{item.label}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
                 {futureNavItems.map((item) => (
                   <SidebarMenuItem key={item.label}>
                     <SidebarMenuButton disabled tooltip={`${item.label} — coming soon`}>
@@ -76,7 +112,7 @@ export function AppLayout() {
         <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger />
           <Separator orientation="vertical" className="h-4" />
-          <span className="text-sm font-medium">Dashboard</span>
+          <span className="text-sm font-medium">{title}</span>
 
           <div className="ml-auto">
             <DropdownMenu>

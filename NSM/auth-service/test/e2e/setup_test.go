@@ -109,6 +109,9 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	sessionRepo := postgres.NewSessionRepository(db)
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(db)
 	loginHistoryRepo := postgres.NewLoginHistoryRepository(db)
+	roleRepo := postgres.NewRoleRepository(db)
+	permissionRepo := postgres.NewPermissionRepository(db)
+	rbacRepo := postgres.NewRBACRepository(db)
 
 	registerTx := func(ctx context.Context, fn func(repository.UserRepository, repository.AuditLogRepository) error) error {
 		return database.WithTx(ctx, db, func(tx *sql.Tx) error {
@@ -185,7 +188,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		AbuseProtection:     abuseProtection,
 		RateLimitRetryAfter: cfg.RateLimit.RetryAfter,
 	})
-	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
+	userSvc := service.NewUserService(userRepo, sessionRepo, passwordSvc, registerTx, loginAuditTx)
 	sessionSvc := service.NewSessionService(sessionRepo)
 	refreshTokenSvc := service.NewRefreshTokenService(service.RefreshTokenServiceDeps{
 		RefreshTokens:       refreshTokenRepo,
@@ -210,10 +213,14 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		abuseProtection,
 		cfg.RateLimit.RetryAfter,
 	)
+	roleSvc := service.NewRoleService(roleRepo, permissionRepo, rbacRepo)
+	rbacSvc := service.NewRBACService(rbacRepo)
 
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,
 		UserService:         userSvc,
+		RoleService:         roleSvc,
+		RBACService:         rbacSvc,
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
 		BootstrapService:    bootstrapSvc,

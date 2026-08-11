@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/mocks"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/service"
@@ -24,11 +26,15 @@ import (
 func newTestUserHandler(t *testing.T) (*userHandler, *mocks.FakeUserRepository, *mocks.FakeAuditLogRepository) {
 	t.Helper()
 	users := mocks.NewFakeUserRepository()
+	sessions := mocks.NewFakeSessionRepository()
 	audit := mocks.NewFakeAuditLogRepository()
 	passwords := security.NewPasswordService(security.Params{
 		Memory: 8 * 1024, Iterations: 1, Parallelism: 2, SaltLength: 16, KeyLength: 32,
 	})
-	svc := service.NewUserService(users, passwords, mocks.FakeRegistrationTx(users, audit))
+	auditTx := func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return fn(audit)
+	}
+	svc := service.NewUserService(users, sessions, passwords, mocks.FakeRegistrationTx(users, audit), auditTx)
 	return &userHandler{svc: svc}, users, audit
 }
 

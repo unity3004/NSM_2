@@ -36,6 +36,17 @@ type PermissionResponse struct {
 	Description *string `json:"description,omitempty"`
 }
 
+// RoleWithPermissionsResponse is GET /v1/roles and GET /v1/roles/{roleId}'s
+// body — RoleResponse plus its live permission list and current user
+// count, so the Roles page renders in one request per the specification's
+// own mockup ("Role / Description / Number of users / Permissions" in one
+// screen), never N+1 follow-up calls per role.
+type RoleWithPermissionsResponse struct {
+	RoleResponse
+	UserCount   int                   `json:"user_count"`
+	Permissions []PermissionResponse `json:"permissions"`
+}
+
 // RoleGrantCreateRequest matches components.schemas.RoleGrantCreate — the
 // shared shape behind POST /users/{id}/roles, POST /groups/{id}/roles, and
 // POST /service-accounts/{id}/roles. ExpiresAt is only meaningful on the

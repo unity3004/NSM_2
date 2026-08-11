@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -19,11 +20,15 @@ import (
 func newTestUserService(t *testing.T) (*UserService, *mocks.FakeUserRepository, *mocks.FakeAuditLogRepository) {
 	t.Helper()
 	users := mocks.NewFakeUserRepository()
+	sessions := mocks.NewFakeSessionRepository()
 	audit := mocks.NewFakeAuditLogRepository()
 	passwords := security.NewPasswordService(security.Params{
 		Memory: 8 * 1024, Iterations: 1, Parallelism: 2, SaltLength: 16, KeyLength: 32,
 	})
-	svc := NewUserService(users, passwords, mocks.FakeRegistrationTx(users, audit))
+	auditTx := func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return fn(audit)
+	}
+	svc := NewUserService(users, sessions, passwords, mocks.FakeRegistrationTx(users, audit), auditTx)
 	return svc, users, audit
 }
 

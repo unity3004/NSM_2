@@ -120,6 +120,19 @@ type UserResponse struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+// UserDetailResponse is GET /v1/users/{userId}'s body — UserResponse's
+// fields plus the user's current role grants (with names, not just IDs)
+// and the permissions those roles confer, resolved fresh on every
+// request (see service.RBACService's own doc comment on why this is
+// never cached or read from a token claim). No password, hash, token, or
+// session-secret field exists on this type for the same reason none
+// exists on UserResponse.
+type UserDetailResponse struct {
+	UserResponse
+	Roles       []RoleGrantResponse  `json:"roles"`
+	Permissions []PermissionResponse `json:"permissions"`
+}
+
 // UserResponseFromEntity is the one place a User entity becomes API JSON.
 func UserResponseFromEntity(u *entity.User) UserResponse {
 	return UserResponse{

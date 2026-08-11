@@ -27,6 +27,13 @@ type RouterDeps struct {
 	// POST /v1/platform/bootstrap (Sprint 2.6) — the one-time
 	// first-administrator setup flow.
 	BootstrapService *service.BootstrapService
+	// RoleService backs GET /v1/roles, GET /v1/roles/{roleId}, and
+	// GET /v1/permissions (Sprint 2.7), and the user-detail endpoint's
+	// role-name resolution.
+	RoleService *service.RoleService
+	// RBACService backs every RequirePermission gate below (Sprint 2.7) —
+	// the first real authorization enforcement in this router.
+	RBACService   *service.RBACService
 	TokenAuth     *util.JWTSigner
 	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
 	// (Milestone 6A) — the first route in this router to actually require
@@ -57,12 +64,22 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux := http.NewServeMux()
 
 	auth := &authHandler{svc: deps.AuthService}
-	users := &userHandler{svc: deps.UserService}
+	users := &userHandler{svc: deps.UserService, roles: deps.RoleService, rbac: deps.RBACService}
 	refresh := &refreshHandler{svc: deps.RefreshTokenService}
 	logout := &logoutHandler{svc: deps.LogoutService}
 	platform := &platformHandler{svc: deps.BootstrapService}
+	roles := &roleHandler{svc: deps.RoleService}
 	requireAuth := middleware.Auth(deps.TokenAuth)
 	requireAccessToken := middleware.Authenticate(deps.AccessTokens, deps.AccessTokenAudience)
+	// requirePermission composes requireAuth with a real-time,
+	// database-backed authorization check (Sprint 2.7) — see
+	// middleware.RequirePermission's own doc comment. Every admin route
+	// below is requireAuth *and then* requirePermission, in that order:
+	// authentication ("who are you") must resolve before authorization
+	// ("are you allowed to do this") has an identity to check.
+	requirePermission := func(permission string, h http.HandlerFunc) http.Handler {
+		return requireAuth(middleware.RequirePermission(deps.RBACService, permission)(h))
+	}
 
 	mux.HandleFunc("GET /healthz", healthCheck)
 
@@ -77,14 +94,38 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux.HandleFunc("POST /v1/auth/token/refresh", auth.refresh) // pre-existing AuthService-backed flow, unchanged
 	mux.HandleFunc("POST /v1/auth/refresh", refresh.refresh)    // Milestone 5B: RefreshTokenService-backed flow
 	mux.HandleFunc("POST /v1/auth/register", users.register)    // self-service signup
-	mux.HandleFunc("POST /v1/users", users.create)              // admin/invite path
 
 	// --- protected: every route below requires a verified access token ---
 	mux.Handle("POST /v1/auth/logout", requireAuth(http.HandlerFunc(auth.logout)))                  // pre-existing AuthService-backed flow, unchanged
 	mux.Handle("POST /v1/auth/logout/current", requireAccessToken(http.HandlerFunc(logout.logout))) // Milestone 6B: LogoutService-backed flow
-	mux.Handle("GET /v1/users", requireAuth(http.HandlerFunc(users.list)))
+
+	// --- user management (Sprint 2.7): every route requires both a
+	// verified access token AND the specific permission named — see
+	// requirePermission above. POST /v1/users previously had no
+	// authentication requirement at all; requiring users:create closes
+	// that gap as a side effect of adding real authorization, not a
+	// separate fix. ---
+	mux.Handle("POST /v1/users", requirePermission("users:create", users.create))
+	mux.Handle("GET /v1/users", requirePermission("users:read", users.list))
+	// GET /v1/users/{userId} is deliberately requireAuth only, not
+	// requirePermission("users:read", ...): every authenticated user must
+	// still be able to view their *own* profile (the existing dashboard's
+	// "Account security" card already depends on this — see
+	// features/users/useCurrentUser.ts on the frontend), which is not an
+	// administrative capability. get() itself checks "is this the
+	// caller's own ID, or do they hold users:read" — see that handler's
+	// doc comment.
 	mux.Handle("GET /v1/users/{userId}", requireAuth(http.HandlerFunc(users.get)))
-	mux.Handle("DELETE /v1/users/{userId}", requireAuth(http.HandlerFunc(users.delete)))
+	mux.Handle("DELETE /v1/users/{userId}", requirePermission("users:delete", users.delete))
+	mux.Handle("POST /v1/users/{userId}/disable", requirePermission("users:disable", users.disable))
+	mux.Handle("POST /v1/users/{userId}/enable", requirePermission("users:disable", users.enable))
+	mux.Handle("POST /v1/users/{userId}/roles", requirePermission("roles:update", users.assignRole))
+	mux.Handle("DELETE /v1/users/{userId}/roles/{roleId}", requirePermission("roles:update", users.removeRole))
+
+	// --- role/permission read API (Sprint 2.7) ---
+	mux.Handle("GET /v1/roles", requirePermission("roles:read", roles.list))
+	mux.Handle("GET /v1/roles/{roleId}", requirePermission("roles:read", roles.get))
+	mux.Handle("GET /v1/permissions", requirePermission("roles:read", roles.listPermissions))
 
 	var handler http.Handler = mux
 	handler = middleware.CORS(deps.AllowedOrigins)(handler)

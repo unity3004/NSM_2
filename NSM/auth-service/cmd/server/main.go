@@ -78,6 +78,9 @@ func main() {
 	sessionRepo := postgres.NewSessionRepository(db)
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(db)
 	loginHistoryRepo := postgres.NewLoginHistoryRepository(db)
+	roleRepo := postgres.NewRoleRepository(db)
+	permissionRepo := postgres.NewPermissionRepository(db)
+	rbacRepo := postgres.NewRBACRepository(db)
 
 	// registerTx is the one place outside internal/repository/postgres
 	// itself that constructs a Postgres repository directly — exactly the
@@ -207,7 +210,7 @@ func main() {
 		AbuseProtection:     abuseProtection,
 		RateLimitRetryAfter: cfg.RateLimit.RetryAfter,
 	})
-	userSvc := service.NewUserService(userRepo, passwordSvc, registerTx)
+	userSvc := service.NewUserService(userRepo, sessionRepo, passwordSvc, registerTx, loginAuditTx)
 	sessionSvc := service.NewSessionService(sessionRepo)
 	refreshTokenSvc := service.NewRefreshTokenService(service.RefreshTokenServiceDeps{
 		RefreshTokens:       refreshTokenRepo,
@@ -232,6 +235,8 @@ func main() {
 		abuseProtection,
 		cfg.RateLimit.RetryAfter,
 	)
+	roleSvc := service.NewRoleService(roleRepo, permissionRepo, rbacRepo)
+	rbacSvc := service.NewRBACService(rbacRepo)
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
@@ -240,6 +245,8 @@ func main() {
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
 		BootstrapService:    bootstrapSvc,
+		RoleService:         roleSvc,
+		RBACService:         rbacSvc,
 		TokenAuth:           tokenSigner,
 		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
