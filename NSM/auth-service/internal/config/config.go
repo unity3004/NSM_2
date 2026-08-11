@@ -36,6 +36,7 @@ type Config struct {
 	AccessToken  AccessTokenConfig  `mapstructure:"access_token"`
 	RefreshToken RefreshTokenConfig `mapstructure:"refresh_token"`
 	RateLimit    RateLimitConfig    `mapstructure:"rate_limit"`
+	Secrets      SecretsConfig      `mapstructure:"secrets"`
 	Log          LogConfig          `mapstructure:"log"`
 }
 
@@ -226,6 +227,25 @@ type BootstrapRateLimitConfig struct {
 	BlockDuration time.Duration `mapstructure:"block_duration"`
 }
 
+// SecretsConfig configures secrets.DevKeyProvider (Sprint 3 Phase 2) — the
+// development-only local key provider backing the Secrets Engine's
+// envelope encryption. DevMasterKey is a base64-encoded 256-bit AES key;
+// like jwt.signing_key and access_token.private_key_pem, it has no
+// default (see setDefaults) and is never a literal in source.
+//
+// Deliberately not required by Validate below, the same way
+// AccessTokenConfig's fields were left unvalidated in Milestone 5A until
+// something actually constructed a security.TokenService from them
+// (Milestone 5B) — Phase 2 builds secrets.EncryptionService and
+// secrets.NewDevKeyProvider, but nothing in this codebase constructs one
+// from Config yet (no REST endpoints exist). secrets.NewDevKeyProvider
+// itself is what validates the value's shape (valid base64, decodes to
+// exactly 32 bytes) once a future phase actually wires it up; duplicating
+// that check here would just be two places that could disagree.
+type SecretsConfig struct {
+	DevMasterKey string `mapstructure:"dev_master_key"`
+}
+
 type LogConfig struct {
 	Level  string `mapstructure:"level"`
 	Format string `mapstructure:"format"`
@@ -293,6 +313,11 @@ func Load() (*Config, error) {
 	// field above.
 	if err := v.BindEnv("redis.password"); err != nil {
 		return nil, fmt.Errorf("config: bind redis.password: %w", err)
+	}
+	// secrets.dev_master_key has no default either, the same no-default
+	// rule every other secret in this function follows.
+	if err := v.BindEnv("secrets.dev_master_key"); err != nil {
+		return nil, fmt.Errorf("config: bind secrets.dev_master_key: %w", err)
 	}
 
 	var cfg Config

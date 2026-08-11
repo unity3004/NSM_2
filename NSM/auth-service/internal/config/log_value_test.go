@@ -14,6 +14,7 @@ import (
 // in its logged form.
 func TestMarshalLogObject_NeverLeaksPrivateKey(t *testing.T) {
 	const fakePrivateKeyPEM = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINTOTALLYFAKEKEYMATERIALTHATMUSTNEVERAPPEAR\n-----END PRIVATE KEY-----\n"
+	const fakeDevMasterKey = "VE9UQUxMWUZBS0VBRVMyNTZLRVlUSEFUTVVTVE5FVkVSQVBQRUFS" // base64, but the point is it must never appear either way
 
 	cfg := Config{
 		Environment: "development",
@@ -21,6 +22,9 @@ func TestMarshalLogObject_NeverLeaksPrivateKey(t *testing.T) {
 			Issuer:        "auth-service",
 			KeyID:         "key-1",
 			PrivateKeyPEM: fakePrivateKeyPEM,
+		},
+		Secrets: SecretsConfig{
+			DevMasterKey: fakeDevMasterKey,
 		},
 	}
 
@@ -37,6 +41,9 @@ func TestMarshalLogObject_NeverLeaksPrivateKey(t *testing.T) {
 		if strings.Contains(s, fakePrivateKeyPEM) || strings.Contains(s, "TOTALLYFAKEKEYMATERIAL") {
 			t.Errorf("field %q = %q leaks the private key PEM content", field, s)
 		}
+		if strings.Contains(s, fakeDevMasterKey) {
+			t.Errorf("field %q = %q leaks the secrets dev master key", field, s)
+		}
 	}
 
 	got, ok := enc.Fields["access_token.private_key_pem"].(string)
@@ -48,6 +55,17 @@ func TestMarshalLogObject_NeverLeaksPrivateKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "(redacted") {
 		t.Errorf("access_token.private_key_pem = %q, want the standard redact() placeholder", got)
+	}
+
+	gotDevKey, ok := enc.Fields["secrets.dev_master_key"].(string)
+	if !ok {
+		t.Fatal("secrets.dev_master_key field missing or not a string")
+	}
+	if gotDevKey == fakeDevMasterKey {
+		t.Error("secrets.dev_master_key was logged verbatim, not redacted")
+	}
+	if !strings.HasPrefix(gotDevKey, "(redacted") {
+		t.Errorf("secrets.dev_master_key = %q, want the standard redact() placeholder", gotDevKey)
 	}
 
 	// A path is not itself secret, and key_id/issuer are operational
