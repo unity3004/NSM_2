@@ -251,6 +251,7 @@ func main() {
 	// not registering /v1/secrets* at all (see NewRouter), rather than
 	// this binary refusing to start or those routes panicking.
 	var secretSvc *service.SecretService
+	var keyRotationSvc *service.KeyRotationService
 	if cfg.Secrets.DevMasterKey == "" {
 		logger.Warn("AUTH_SECRETS_DEV_MASTER_KEY not set — Secrets Engine disabled, /v1/secrets routes will not be registered")
 	} else {
@@ -260,7 +261,19 @@ func main() {
 			logger.Error("failed to construct secrets key provider", zap.Error(err))
 			os.Exit(1)
 		}
-		encryptionSvc := secrets.NewEncryptionService(keyProvider)
+		// Sprint 4 Task 1: EncryptionService no longer talks to
+		// keyProvider directly — KeyManager sits between them (Secret ->
+		// Crypto Service -> Key Manager -> Key Provider, per this sprint's
+		// objective), adding lifecycle state and rotation on top of the
+		// same DevKeyProvider this deployment has always used. This is
+		// the only line that changed for EncryptionService to gain that
+		// layer: *secrets.KeyManager implements secrets.KeyProvider
+		// (same GetCurrentKey/GetKey signatures), so
+		// NewEncryptionService's own code is untouched — see
+		// secrets.KeyManager's doc comment.
+		keyMetadataStore := postgres.NewKeyMetadataStore(db)
+		keyManager := secrets.NewKeyManager(keyProvider, keyMetadataStore)
+		encryptionSvc := secrets.NewEncryptionService(keyManager)
 		// loginAuditTx (constructed above for AuthService/RefreshTokenService/
 		// LogoutService/BootstrapService) is reused verbatim — it's already
 		// exactly service.AuditTxFunc's shape, and SecretService's own audit
@@ -268,6 +281,17 @@ func main() {
 		// consumer of this closure's writes already are (see
 		// SecretService.recordSecretAudit's doc comment).
 		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, loginAuditTx)
+
+		keyRotationSvc = service.NewKeyRotationService(keyManager, secretRepo, loginAuditTx)
+		// Explicit at startup, not left to happen lazily on the first
+		// /v1/secrets request — see KeyRotationService.EnsureBootstrapped's
+		// own doc comment for why: a misconfigured or unreachable key
+		// metadata store fails the process here, with a clear log line,
+		// instead of surfacing as a confusing first-request error later.
+		if _, err := keyRotationSvc.EnsureBootstrapped(context.Background()); err != nil {
+			logger.Error("failed to bootstrap the Secrets Engine's key manager", zap.Error(err))
+			os.Exit(1)
+		}
 	}
 
 	// --- delivery: HTTP handlers + router ---

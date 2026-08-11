@@ -60,6 +60,21 @@ type SecretRepository interface {
 	GetCurrentVersion(ctx context.Context, secretID string) (*entity.SecretVersion, error)
 	ListVersions(ctx context.Context, secretID string) ([]*entity.SecretVersion, error)
 	SoftDeleteVersion(ctx context.Context, secretID string, version int) error
+
+	// CountVersionsByKeyID counts secret_versions rows across every
+	// secret and organization whose key_id equals keyID — global, not
+	// scoped to one secret, because internal/secrets.KeyManager's key
+	// identifiers are themselves platform-wide (see
+	// migrations/000026_create_encryption_keys_table's own doc comment on
+	// why encryption_keys has no organization_id). This is
+	// service.KeyRotationService.RetireKey's answer to "does any
+	// remaining encrypted data require this key" — the reference check
+	// the objective's ROTATION SAFETY section requires before a key may
+	// move to KeyStateRetired. Soft-deleted versions still count: their
+	// ciphertext is still present in the database and still needs this
+	// key to ever be readable again, even though SecretService's normal
+	// reads skip them.
+	CountVersionsByKeyID(ctx context.Context, keyID string) (int, error)
 }
 
 // SecretFilter narrows SecretRepository.List. Zero value means "no filter".

@@ -169,6 +169,17 @@ func scanSecretVersion(row interface{ Scan(dest ...any) error }) (*entity.Secret
 	return &v, nil
 }
 
+// CountVersionsByKeyID is a deliberately unfiltered, cross-organization
+// query — see the interface's own doc comment for why that scope is
+// correct here, unlike every other method on this repository.
+func (r *secretRepository) CountVersionsByKeyID(ctx context.Context, keyID string) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM secret_versions WHERE key_id = $1`, keyID,
+	).Scan(&count)
+	return count, err
+}
+
 // CreateVersion locks the parent secrets row, computes the next version
 // number from it, inserts the new secret_versions row and advances
 // secrets.current_version — all inside one transaction. Equivalent to

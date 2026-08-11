@@ -806,6 +806,23 @@ func (f *FakeSecretRepository) SoftDeleteVersion(_ context.Context, secretID str
 	return entity.ErrNotFound
 }
 
+// CountVersionsByKeyID mirrors postgres.secretRepository.CountVersionsByKeyID's
+// cross-secret scope — every version of every secret this fake knows
+// about, soft-deleted or not, counts if its KeyID matches.
+func (f *FakeSecretRepository) CountVersionsByKeyID(_ context.Context, keyID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, versions := range f.versions {
+		for _, v := range versions {
+			if v.KeyID == keyID {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // FakeRBACRepository implements repository.RBACRepository over an
 // in-memory userID -> granted "resource:action" set — enough for
 // internal/service tests to construct a real *service.RBACService (see
