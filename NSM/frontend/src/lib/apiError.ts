@@ -33,6 +33,15 @@ export class ApiError extends Error {
     return this.code === "RATE_LIMITED"
   }
 
+  /** True for PUT /v1/secrets/{path}'s own conflict code — the If-Match
+   * header named a version that is no longer current (someone else updated
+   * this secret first). Distinct from the generic CONFLICT code (e.g.
+   * POST /v1/secrets on a duplicate path) so a caller can show "refresh and
+   * retry" copy specifically for this one, not a generic conflict message. */
+  get isVersionConflict() {
+    return this.code === "VERSION_CONFLICT"
+  }
+
   get isUnauthenticated() {
     return this.code === "UNAUTHENTICATED" || this.status === 401
   }

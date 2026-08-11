@@ -7,6 +7,7 @@ import { SetupPage } from "@/pages/SetupPage"
 import { DashboardPage } from "@/pages/DashboardPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { RolesPage } from "@/pages/RolesPage"
+import { SecretsPage } from "@/pages/SecretsPage"
 
 export const router = createBrowserRouter([
   { path: "/", element: <Navigate to="/dashboard" replace /> },
@@ -26,6 +27,7 @@ export const router = createBrowserRouter([
           { path: "/dashboard", element: <DashboardPage /> },
           { path: "/users", element: <UsersPage /> },
           { path: "/roles", element: <RolesPage /> },
+          { path: "/secrets", element: <SecretsPage /> },
         ],
       },
     ],

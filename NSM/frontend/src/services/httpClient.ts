@@ -5,7 +5,7 @@ import type { ErrorEnvelope } from "@/types/common"
 import type { TokenResponse } from "@/types/auth"
 
 export interface RequestOptions {
-  method?: "GET" | "POST" | "DELETE" | "PATCH"
+  method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
   body?: unknown
   signal?: AbortSignal
   /**
@@ -15,6 +15,27 @@ export interface RequestOptions {
    * below, which must never apply to the refresh call itself.
    */
   auth?: boolean
+  /**
+   * Extra headers merged in after the defaults above (Content-Type,
+   * X-Organization-Id) — e.g. secretsApi's If-Match on PUT
+   * /v1/secrets/{path} for optimistic concurrency. Never a substitute for
+   * the auth header, which is always handled separately, below.
+   */
+  headers?: Record<string, string>
+  /**
+   * Whether a 401 on this call should trigger the shared refresh-then-retry
+   * flow below. Defaults to true. GETs are naturally idempotent and safe to
+   * retry, and the one non-GET on the authenticated path this app has had
+   * until now (POST /v1/auth/logout) is idempotent in effect — see this
+   * function's own prior doc comment, which already flagged that a
+   * genuinely non-idempotent write retried transparently here could
+   * misbehave. secretsApi's create/update calls are the first such writes:
+   * they set this to false so a 401 surfaces as a real, visible
+   * "session expired" outcome instead of a silent retry that could show the
+   * user a confusing duplicate-path or version-conflict error for a write
+   * that only failed because the token needed refreshing.
+   */
+  retryOn401?: boolean
 }
 
 async function rawRequest(path: string, options: RequestOptions): Promise<Response> {
@@ -25,6 +46,7 @@ async function rawRequest(path: string, options: RequestOptions): Promise<Respon
     // sent unconditionally since the handlers that don't read it simply
     // ignore it.
     "X-Organization-Id": ORGANIZATION_ID,
+    ...options.headers,
   }
   if (options.auth !== false) {
     const token = useAuthStore.getState().accessToken
@@ -124,7 +146,7 @@ function getOrStartRefresh(): Promise<TokenResponse> {
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const res = await rawRequest(path, options)
 
-  const shouldAttemptRefresh = res.status === 401 && options.auth !== false
+  const shouldAttemptRefresh = res.status === 401 && options.auth !== false && options.retryOn401 !== false
   if (!shouldAttemptRefresh) {
     return parseResponse<T>(res)
   }
@@ -161,6 +183,8 @@ export const httpClient = {
     apiRequest<T>(path, { ...options, method: "GET" }),
   post: <T>(path: string, body?: unknown, options?: Omit<RequestOptions, "method" | "body">) =>
     apiRequest<T>(path, { ...options, method: "POST", body }),
+  put: <T>(path: string, body?: unknown, options?: Omit<RequestOptions, "method" | "body">) =>
+    apiRequest<T>(path, { ...options, method: "PUT", body }),
   delete: <T>(path: string, options?: Omit<RequestOptions, "method" | "body">) =>
     apiRequest<T>(path, { ...options, method: "DELETE" }),
 }

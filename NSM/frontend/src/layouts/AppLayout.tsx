@@ -46,13 +46,17 @@ const navItems = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, permission: null },
   { to: "/users", label: "Users", icon: UsersIcon, permission: "users:read" },
   { to: "/roles", label: "Roles", icon: RolesIcon, permission: "roles:read" },
+  // Sprint 3 Phase 5: gated on secrets:list, matching GET /v1/secrets'
+  // own backend permission requirement exactly (router.go) — the same
+  // "hide what the real backend would refuse anyway" convention every
+  // other gated item here already follows.
+  { to: "/secrets", label: "Secrets", icon: KeyRound, permission: "secrets:list" },
 ] as const
 
 // Shown but disabled — the sidebar's information architecture is honest
 // about what this product will eventually cover without pretending these
 // surfaces are built yet.
 const futureNavItems = [
-  { label: "Secrets", icon: KeyRound },
   { label: "Audit Logs", icon: ScrollText },
   { label: "Settings", icon: SettingsIcon },
 ]
@@ -61,6 +65,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/users": "Users",
   "/roles": "Roles",
+  "/secrets": "Secrets",
 }
 
 export function AppLayout() {
