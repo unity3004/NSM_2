@@ -23,6 +23,7 @@ import (
 	redisclient "github.com/acme/auth-service/internal/redis"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/postgres"
+	"github.com/acme/auth-service/internal/secrets"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/service"
 	"github.com/acme/auth-service/internal/util"
@@ -238,6 +239,37 @@ func main() {
 	roleSvc := service.NewRoleService(roleRepo, permissionRepo, rbacRepo)
 	rbacSvc := service.NewRBACService(rbacRepo)
 
+	// secretSvc (Sprint 3 Phase 4) is only constructed when the Secrets
+	// Engine's key material is actually configured — see
+	// config.SecretsConfig's own doc comment for why Validate doesn't hard
+	// -require AUTH_SECRETS_DEV_MASTER_KEY the way it does
+	// jwt.signing_key: DevKeyProvider is explicitly development-only
+	// (internal/secrets/key_provider.go), and this codebase has no
+	// production-grade KeyProvider yet. Leaving it unset is a legitimate,
+	// supported "Secrets Engine not enabled for this deployment" state —
+	// httphandler.RouterDeps.SecretService tolerates a nil value by simply
+	// not registering /v1/secrets* at all (see NewRouter), rather than
+	// this binary refusing to start or those routes panicking.
+	var secretSvc *service.SecretService
+	if cfg.Secrets.DevMasterKey == "" {
+		logger.Warn("AUTH_SECRETS_DEV_MASTER_KEY not set — Secrets Engine disabled, /v1/secrets routes will not be registered")
+	} else {
+		secretRepo := postgres.NewSecretRepository(db)
+		keyProvider, err := secrets.NewDevKeyProvider(cfg.Secrets.DevMasterKeyID, cfg.Secrets.DevMasterKey)
+		if err != nil {
+			logger.Error("failed to construct secrets key provider", zap.Error(err))
+			os.Exit(1)
+		}
+		encryptionSvc := secrets.NewEncryptionService(keyProvider)
+		// loginAuditTx (constructed above for AuthService/RefreshTokenService/
+		// LogoutService/BootstrapService) is reused verbatim — it's already
+		// exactly service.AuditTxFunc's shape, and SecretService's own audit
+		// writes are best-effort/single-repository the same way every other
+		// consumer of this closure's writes already are (see
+		// SecretService.recordSecretAudit's doc comment).
+		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, loginAuditTx)
+	}
+
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,
@@ -247,6 +279,7 @@ func main() {
 		BootstrapService:    bootstrapSvc,
 		RoleService:         roleSvc,
 		RBACService:         rbacSvc,
+		SecretService:       secretSvc,
 		TokenAuth:           tokenSigner,
 		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,

@@ -57,6 +57,7 @@ func (c Config) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddInt64("rate_limit.refresh.ip_limit", c.RateLimit.Refresh.IPLimit)
 	enc.AddDuration("rate_limit.refresh.block_duration", c.RateLimit.Refresh.BlockDuration)
 	enc.AddString("secrets.dev_master_key", redact(c.Secrets.DevMasterKey))
+	enc.AddString("secrets.dev_master_key_id", c.Secrets.DevMasterKeyID)
 	enc.AddString("log.level", c.Log.Level)
 	return nil
 }

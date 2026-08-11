@@ -39,6 +39,14 @@ const (
 	CodeNotFound           = "NOT_FOUND"
 	CodeConflict           = "CONFLICT"
 	CodeOwnerConflict      = "OWNER_CONFLICT"
+	// CodeVersionConflict is entity.ErrVersionConflict's wire code (Sprint
+	// 3 Phase 4) — deliberately distinct from CodeConflict ("Resource
+	// already exists."), which has the wrong meaning for "you updated
+	// against a stale version": both map to 409, but a client needs to
+	// tell "retry with a different path" apart from "re-read the current
+	// version and retry" by machine-readable code, not by parsing the
+	// message.
+	CodeVersionConflict    = "VERSION_CONFLICT"
 	CodeTokenExpired       = "TOKEN_EXPIRED"
 	CodeTokenReuseDetected = "TOKEN_REUSE_DETECTED"
 	CodeRateLimited        = "RATE_LIMITED"

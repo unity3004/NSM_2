@@ -44,6 +44,13 @@ tags:
     description: Named, reusable bundles of permissions.
   - name: Permissions
     description: System-defined capabilities (read-only).
+  - name: Secrets
+    description: >-
+      Encrypted key/value secret storage (Sprint 3). Every value is
+      envelope-encrypted (AES-256-GCM) before it ever reaches the
+      database; only GET /secrets/{path} — an explicit, authorized read —
+      ever returns a decrypted value. List and write responses carry
+      metadata only.
   - name: Service Accounts
     description: Machine/workload principals.
   - name: API Keys
@@ -776,6 +783,130 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Permission' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== SECRETS ==============================
+  # Requires secrets:list/create/read/update/delete respectively — see
+  # each operation below. Every route also requires bearer auth (the
+  # global `security:` requirement at the top of this document).
+  /secrets:
+    get:
+      tags: [Secrets]
+      summary: List secrets (metadata only)
+      description: Requires secrets:list. Never returns a value, ciphertext, nonce, or key — see components.schemas.Secret.
+      operationId: listSecrets
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Secret' } }
+                  page: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Secrets]
+      summary: Create a secret
+      description: Requires secrets:create. The entire `data` object is encrypted as one unit — there is no partial/selective encryption of individual fields.
+      operationId: createSecret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SecretCreate' }
+            example: { path: "prod/example-service/db", data: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: A secret already exists at this path.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /secrets/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+        description: >-
+          The secret's logical, hierarchical path, e.g. `prod/database`.
+          May contain `/` as a namespace separator — the entire trailing
+          segment is one identifier, never a nested sub-resource route,
+          and is never resolved against a filesystem. `.` and `..`
+          segments, empty segments, and out-of-range characters are
+          rejected (422).
+        example: prod/example-service/db
+    get:
+      tags: [Secrets]
+      summary: Read a secret's current or a specific historical version
+      description: >-
+        Requires secrets:read. This is the only Secrets endpoint whose
+        response contains a decrypted value — returned only because this
+        specific request already passed server-side authorization.
+      operationId: getSecret
+      parameters:
+        - name: version
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: A specific historical version. Omit for the current version. Versions are immutable and sequential starting at 1.
+      responses:
+        '200':
+          description: OK.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecretValue' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    put:
+      tags: [Secrets]
+      summary: Create a new version of a secret
+      description: >-
+        Requires secrets:update. Always creates a new, immutable version —
+        never overwrites an existing one. Optimistic concurrency is
+        mandatory: If-Match must name the version this update expects to
+        be current.
+      operationId: updateSecret
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+          description: 'The version this update expects to still be current, e.g. "3". Required on every request — there is no way to update a secret without stating what version it is replacing.'
+          example: '"3"'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SecretUpdate' }
+            example: { data: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY_2" } }
+      responses:
+        '200':
+          description: A new version was created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: If-Match does not equal the secret's current version — re-read the current version and retry; never silently overwritten.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Secrets]
+      summary: Soft-delete a secret
+      description: Requires secrets:delete. Ciphertext is retained (soft delete only — see components.schemas.Secret); a normal GET afterward returns 404.
+      operationId: deleteSecret
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   # ============================== SERVICE ACCOUNTS ==============================
@@ -1575,6 +1706,55 @@ components:
         action: { type: string }
         name: { type: string, example: "secret:read" }
         description: { type: string, nullable: true }
+
+    # ---------- Secrets ----------
+    SecretCreate:
+      type: object
+      required: [path, data]
+      properties:
+        path:
+          type: string
+          description: Hierarchical secret path. See /secrets/{path}'s own parameter description for the exact rules.
+          example: prod/example-service/db
+        data:
+          type: object
+          additionalProperties: { type: string }
+          description: The entire structured secret value — encrypted as one unit, never per-field.
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" }
+    SecretUpdate:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: { type: string }
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY_2" }
+    Secret:
+      type: object
+      description: >-
+        Secret metadata — the response shape for list/create/update. Never
+        contains a value, ciphertext, nonce, or encryption key; no field on
+        this schema could hold one.
+      properties:
+        path: { type: string, example: prod/example-service/db }
+        version: { type: integer, example: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SecretValue:
+      type: object
+      description: >-
+        A decrypted secret value — returned only by GET /secrets/{path},
+        and only after that request already passed server-side
+        secrets:read authorization.
+      properties:
+        path: { type: string, example: prod/example-service/db }
+        version: { type: integer, example: 1 }
+        data:
+          type: object
+          additionalProperties: { type: string }
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
 
     # ---------- Service Accounts ----------
     ServiceAccount:

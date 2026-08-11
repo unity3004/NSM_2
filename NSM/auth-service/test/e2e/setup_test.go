@@ -37,6 +37,7 @@ import (
 	redisclient "github.com/acme/auth-service/internal/redis"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/repository/postgres"
+	"github.com/acme/auth-service/internal/secrets"
 	"github.com/acme/auth-service/internal/security"
 	"github.com/acme/auth-service/internal/service"
 	"github.com/acme/auth-service/internal/util"
@@ -216,11 +217,29 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	roleSvc := service.NewRoleService(roleRepo, permissionRepo, rbacRepo)
 	rbacSvc := service.NewRBACService(rbacRepo)
 
+	// secretSvc (Sprint 3 Phase 4) mirrors cmd/server/main.go's own
+	// conditional wiring exactly (see that file's comment on why): only
+	// constructed when AUTH_SECRETS_DEV_MASTER_KEY is set, so every e2e
+	// test that doesn't care about the Secrets Engine is completely
+	// unaffected — nil is a supported RouterDeps.SecretService value, and
+	// /v1/secrets simply isn't registered when it's nil.
+	var secretSvc *service.SecretService
+	if cfg.Secrets.DevMasterKey != "" {
+		secretRepo := postgres.NewSecretRepository(db)
+		keyProvider, err := secrets.NewDevKeyProvider(cfg.Secrets.DevMasterKeyID, cfg.Secrets.DevMasterKey)
+		if err != nil {
+			t.Fatalf("newE2EEnv: construct secrets key provider: %v", err)
+		}
+		encryptionSvc := secrets.NewEncryptionService(keyProvider)
+		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, loginAuditTx)
+	}
+
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,
 		UserService:         userSvc,
 		RoleService:         roleSvc,
 		RBACService:         rbacSvc,
+		SecretService:       secretSvc,
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
 		BootstrapService:    bootstrapSvc,

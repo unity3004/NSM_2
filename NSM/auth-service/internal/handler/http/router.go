@@ -33,7 +33,13 @@ type RouterDeps struct {
 	RoleService *service.RoleService
 	// RBACService backs every RequirePermission gate below (Sprint 2.7) —
 	// the first real authorization enforcement in this router.
-	RBACService   *service.RBACService
+	RBACService *service.RBACService
+	// SecretService backs /v1/secrets* (Sprint 3 Phase 4). May be nil —
+	// cmd/server/main.go only constructs one when the Secrets Engine's key
+	// material is actually configured (see that file's own comment) — in
+	// which case the routes below are simply never registered, rather
+	// than panicking on a nil service the first time one of them runs.
+	SecretService *service.SecretService
 	TokenAuth     *util.JWTSigner
 	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
 	// (Milestone 6A) — the first route in this router to actually require
@@ -126,6 +132,26 @@ func NewRouter(deps RouterDeps) http.Handler {
 	mux.Handle("GET /v1/roles", requirePermission("roles:read", roles.list))
 	mux.Handle("GET /v1/roles/{roleId}", requirePermission("roles:read", roles.get))
 	mux.Handle("GET /v1/permissions", requirePermission("roles:read", roles.listPermissions))
+
+	// --- secrets (Sprint 3 Phase 4): every route requires both a verified
+	// access token and the specific secrets:* permission named — the same
+	// requirePermission composition every other admin route above already
+	// uses, layered on top of SecretService's own internal RBAC check
+	// (defense-in-depth, not redundant — see that service's doc comment).
+	// {path...} is a Go 1.22 ServeMux trailing wildcard: it matches every
+	// remaining path segment after "/v1/secrets/", slashes included, as
+	// one r.PathValue("path") string — e.g. "prod/database" — never
+	// resolved against a filesystem anywhere in this call chain. See
+	// secretHandler.get's own doc comment for the traversal-safety
+	// argument in full.
+	if deps.SecretService != nil {
+		secrets := &secretHandler{svc: deps.SecretService}
+		mux.Handle("GET /v1/secrets", requirePermission("secrets:list", secrets.list))
+		mux.Handle("POST /v1/secrets", requirePermission("secrets:create", secrets.create))
+		mux.Handle("GET /v1/secrets/{path...}", requirePermission("secrets:read", secrets.get))
+		mux.Handle("PUT /v1/secrets/{path...}", requirePermission("secrets:update", secrets.update))
+		mux.Handle("DELETE /v1/secrets/{path...}", requirePermission("secrets:delete", secrets.delete))
+	}
 
 	var handler http.Handler = mux
 	handler = middleware.CORS(deps.AllowedOrigins)(handler)

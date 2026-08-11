@@ -233,17 +233,27 @@ type BootstrapRateLimitConfig struct {
 // like jwt.signing_key and access_token.private_key_pem, it has no
 // default (see setDefaults) and is never a literal in source.
 //
-// Deliberately not required by Validate below, the same way
-// AccessTokenConfig's fields were left unvalidated in Milestone 5A until
-// something actually constructed a security.TokenService from them
-// (Milestone 5B) — Phase 2 builds secrets.EncryptionService and
-// secrets.NewDevKeyProvider, but nothing in this codebase constructs one
-// from Config yet (no REST endpoints exist). secrets.NewDevKeyProvider
-// itself is what validates the value's shape (valid base64, decodes to
-// exactly 32 bytes) once a future phase actually wires it up; duplicating
-// that check here would just be two places that could disagree.
+// Deliberately still not required by Validate below (see Phase 4's own
+// note in cmd/server/main.go): this codebase still has no production-grade
+// KeyProvider (AWS KMS, Azure Key Vault, GCP KMS, an HSM) — only
+// DevKeyProvider, which is explicitly development-only (see its own doc
+// comment). Requiring this field in every environment would force a
+// production deployment to configure a key this codebase's own
+// documentation says must never be used there. Instead, Phase 4's
+// cmd/server/main.go wires the Secrets Engine (repository, encryption
+// service, SecretService, and the /v1/secrets routes) only when
+// DevMasterKey is actually set, and simply leaves /v1/secrets unregistered
+// otherwise — an honest "not configured" state, not a forced,
+// wrong-for-production requirement.
+//
+// DevMasterKeyID has a default (see setDefaults) — it is this phase's
+// only key, given a stable, human-readable label the same way
+// access_token.key_id labels its own key, but with nothing to rotate to
+// yet, so an operator-chosen value isn't required the way
+// access_token.key_id's is.
 type SecretsConfig struct {
-	DevMasterKey string `mapstructure:"dev_master_key"`
+	DevMasterKey   string `mapstructure:"dev_master_key"`
+	DevMasterKeyID string `mapstructure:"dev_master_key_id"`
 }
 
 type LogConfig struct {
@@ -419,6 +429,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rate_limit.bootstrap.ip_window", 1*time.Hour)
 	v.SetDefault("rate_limit.bootstrap.ip_limit", 5)
 	v.SetDefault("rate_limit.bootstrap.block_duration", 1*time.Hour)
+
+	v.SetDefault("secrets.dev_master_key_id", "dev-key-1")
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")

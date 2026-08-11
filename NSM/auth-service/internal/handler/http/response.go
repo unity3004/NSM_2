@@ -112,6 +112,15 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErrorEnvelope(w, r, http.StatusUnauthorized, dto.CodeInvalidCredentials, "Email or password is incorrect.", nil)
 	case errors.Is(err, entity.ErrAccountDisabled):
 		writeErrorEnvelope(w, r, http.StatusForbidden, dto.CodeAccountDisabled, "Account is disabled.", nil)
+	case errors.Is(err, entity.ErrForbidden):
+		// Sprint 3 Phase 4: SecretService is the first service to return
+		// this sentinel itself (see its own doc comment on why it performs
+		// its own RBAC check as well as relying on
+		// middleware.RequirePermission) — every route that can reach here
+		// is already gated by that middleware too, so in normal operation
+		// this case is defense-in-depth, not the primary way a client
+		// experiences a 403.
+		writeErrorEnvelope(w, r, http.StatusForbidden, dto.CodeForbidden, "You do not have permission to perform this action.", nil)
 	case errors.Is(err, entity.ErrTokenExpired):
 		writeErrorEnvelope(w, r, http.StatusUnauthorized, dto.CodeTokenExpired, "Refresh token has expired.", nil)
 	case errors.Is(err, entity.ErrTokenReuseDetected):
@@ -121,8 +130,27 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErrorEnvelope(w, r, http.StatusConflict, dto.CodeOwnerConflict, "Exactly one of owner_user_id or owner_service_account_id is required.", nil)
 	case errors.Is(err, entity.ErrAlreadyExists):
 		writeErrorEnvelope(w, r, http.StatusConflict, dto.CodeConflict, "Resource already exists.", nil)
+	case errors.Is(err, entity.ErrVersionConflict):
+		// Sprint 3 Phase 4: the secret was updated by someone else between
+		// the caller's read and its PUT — see UpdateSecret's own doc
+		// comment for why ExpectedVersion (the If-Match header at the HTTP
+		// boundary) is mandatory, never optional. A distinct code from
+		// CodeConflict on purpose: "re-read and retry" is a different
+		// client action than "pick a different path."
+		writeErrorEnvelope(w, r, http.StatusConflict, dto.CodeVersionConflict,
+			"The secret was updated by someone else; the expected version is no longer current.", nil)
 	case errors.Is(err, entity.ErrNotFound):
 		writeErrorEnvelope(w, r, http.StatusNotFound, dto.CodeNotFound, "No such resource.", nil)
+	case errors.Is(err, util.ErrInvalidSecretPath):
+		// Sprint 3 Phase 4: reachable when a path arrives already-invalid
+		// on GET/PUT/DELETE /v1/secrets/{path...} — those routes have no
+		// request body for a dto.Validate() to catch this earlier (unlike
+		// SecretCreateRequest.Validate, which already rejects a bad path
+		// before this point on POST). SecretService's own re-validation is
+		// what actually catches it either way.
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Invalid secret path.", nil)
+	case errors.Is(err, service.ErrEmptyPayload):
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Secret payload must not be empty.", nil)
 	default:
 		// Anything else is unmapped — middleware.Recover would also catch
 		// a panic, but a plain returned error should still become a clean
