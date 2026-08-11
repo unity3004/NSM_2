@@ -2,7 +2,9 @@ import { useRef, useState, type FormEvent } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { PasswordInput } from "@/components/PasswordInput"
+import { ConnectionSecurityIndicator } from "@/components/ConnectionSecurityIndicator"
 import { useLogin } from "@/features/auth/useLogin"
 import { ApiError } from "@/lib/apiError"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
@@ -12,14 +14,19 @@ import { friendlyErrorMessage } from "@/lib/errorMessage"
  * anti-enumeration design (INVALID_CREDENTIALS never distinguishes "no such
  * user" from "wrong password"; see AuthService.Login). This mapping must
  * not "help" by being more specific than the backend already chose to be.
- * Only the login-specific case (wrong credentials) needs copy of its own;
- * everything else (locked, rate-limited, validation, network, 5xx) falls
- * through to the app-wide mapping in lib/errorMessage.ts so this form
- * doesn't maintain its own duplicate copy of generic error text.
+ * A few cases here intentionally use login-specific wording that differs
+ * from lib/errorMessage.ts's generic copy (e.g. "login attempts" instead
+ * of "attempts") — everything else falls through to that shared mapping
+ * so this form doesn't maintain a full duplicate of it.
  */
 function friendlyLoginError(error: unknown): string {
-  if (error instanceof ApiError && error.isInvalidCredentials) {
-    return "Incorrect email or password."
+  if (error instanceof ApiError) {
+    if (error.isInvalidCredentials) return "Invalid email or password."
+    if (error.code === "ACCOUNT_DISABLED") {
+      return "Your account has been disabled. Contact your administrator."
+    }
+    if (error.isRateLimited) return "Too many login attempts. Please try again later."
+    if (error.code === "NETWORK_ERROR") return "Unable to connect to the authentication service."
   }
   return friendlyErrorMessage(error)
 }
@@ -27,6 +34,11 @@ function friendlyLoginError(error: unknown): string {
 export function LoginForm() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  // Client-side "is this field empty" feedback — separate from the
+  // backend's own field errors below, and checked before a request is
+  // even sent, so an empty submit never costs a network round trip just
+  // to learn what the browser could already tell us.
+  const [touched, setTouched] = useState(false)
   const login = useLogin()
   // A ref, not login.isPending: isPending is React state, which only
   // updates on the next render. Two submits dispatched in the same tick
@@ -39,8 +51,13 @@ export function LoginForm() {
   // alone cannot.
   const submitting = useRef(false)
 
+  const emailMissing = touched && email.trim() === ""
+  const passwordMissing = touched && password === ""
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
+    setTouched(true)
+    if (email.trim() === "" || password === "") return
     if (submitting.current) return
     submitting.current = true
     login.mutate(
@@ -56,60 +73,74 @@ export function LoginForm() {
     }
   }
 
+  const emailError = emailMissing ? "Email is required." : fieldErrors.get("email")
+  const passwordError = passwordMissing ? "Password is required." : fieldErrors.get("password")
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-xl">Sign in</CardTitle>
-        <CardDescription>Enter your credentials to access your account.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-5">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              name="email"
-              type="email"
-              autoComplete="username"
-              autoFocus
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              aria-invalid={fieldErrors.has("email")}
-              required
-            />
-            {fieldErrors.has("email") && (
-              <p className="text-sm text-destructive">{fieldErrors.get("email")}</p>
+    <div className="flex flex-col gap-4">
+      <Card className="shadow-lg shadow-black/20">
+        <CardHeader>
+          <CardTitle className="text-xl">Welcome back</CardTitle>
+          <CardDescription>Sign in to access your organization's secrets.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-5">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                name="email"
+                type="email"
+                autoComplete="username"
+                autoFocus
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                aria-invalid={!!emailError}
+                aria-describedby={emailError ? "email-error" : undefined}
+              />
+              {emailError && (
+                <p id="email-error" className="text-sm text-destructive">
+                  {emailError}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="password">Password</Label>
+              <PasswordInput
+                id="password"
+                name="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                aria-invalid={!!passwordError}
+                aria-describedby={passwordError ? "password-error" : undefined}
+              />
+              {passwordError && (
+                <p id="password-error" className="text-sm text-destructive">
+                  {passwordError}
+                </p>
+              )}
+            </div>
+
+            {login.isError && (
+              <p role="alert" className="text-sm text-destructive">
+                {friendlyLoginError(login.error)}
+              </p>
             )}
-          </div>
 
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              aria-invalid={fieldErrors.has("password")}
-              required
-            />
-            {fieldErrors.has("password") && (
-              <p className="text-sm text-destructive">{fieldErrors.get("password")}</p>
-            )}
-          </div>
+            <Button
+              type="submit"
+              disabled={login.isPending}
+              className="mt-1 h-10 text-sm font-semibold tracking-wide uppercase"
+            >
+              {login.isPending ? "Authenticating…" : "Sign in"}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
-          {login.isError && (
-            <p role="alert" className="text-sm text-destructive">
-              {friendlyLoginError(login.error)}
-            </p>
-          )}
-
-          <Button type="submit" disabled={login.isPending} className="mt-1">
-            {login.isPending ? "Signing in…" : "Sign in"}
-          </Button>
-        </form>
-      </CardContent>
-    </Card>
+      <ConnectionSecurityIndicator />
+    </div>
   )
 }

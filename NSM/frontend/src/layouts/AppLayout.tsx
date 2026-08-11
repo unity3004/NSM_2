@@ -22,9 +22,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { ShieldCheck, LayoutDashboard, KeyRound, Users, ScrollText, LogOut } from "lucide-react"
+import { LayoutDashboard, KeyRound, Users, ScrollText, LogOut } from "lucide-react"
 import { useCurrentUser } from "@/features/users/useCurrentUser"
 import { useLogout } from "@/features/auth/useLogout"
+import { Brand } from "@/components/Brand"
 
 // Shown but disabled — the sidebar's information architecture is honest
 // about what this product will eventually cover without pretending these
@@ -45,12 +46,7 @@ export function AppLayout() {
     <SidebarProvider>
       <Sidebar collapsible="icon">
         <SidebarHeader>
-          <div className="flex items-center gap-2 px-2 py-1.5">
-            <ShieldCheck className="size-5 shrink-0 text-primary" strokeWidth={1.75} />
-            <span className="text-sm font-semibold tracking-tight group-data-[collapsible=icon]:hidden">
-              Vaultis
-            </span>
-          </div>
+          <Brand className="px-2 py-1.5" textClassName="group-data-[collapsible=icon]:hidden" />
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
