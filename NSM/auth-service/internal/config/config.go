@@ -293,6 +293,17 @@ func Load() (*Config, error) {
 	if err := v.BindEnv("database.password"); err != nil {
 		return nil, fmt.Errorf("config: bind database.password: %w", err)
 	}
+	// database.url has no default either (DatabaseConfig.DSN prefers it
+	// over the composed host/port/user/name fields when set — see that
+	// method's own doc comment) — the same gotcha as every other
+	// no-default field in this function: without this bind,
+	// AUTH_DATABASE_URL is silently never read at all, and DSN() silently
+	// falls back to the composed default (host=localhost, name=authdb),
+	// which can be a real, existing database that just isn't the one the
+	// caller meant to point at, rather than a loud connection failure.
+	if err := v.BindEnv("database.url"); err != nil {
+		return nil, fmt.Errorf("config: bind database.url: %w", err)
+	}
 	// access_token.key_id/private_key_pem/private_key_path have no
 	// default either (see AccessTokenConfig's doc comment), so they need
 	// the same explicit BindEnv treatment as the two secrets above —

@@ -7,6 +7,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/repository"
+	"github.com/acme/auth-service/internal/util"
 )
 
 // secretRepository takes a concrete *sql.DB, not the package's dbtx
@@ -36,11 +37,32 @@ func scanSecret(row interface{ Scan(dest ...any) error }) (*entity.Secret, error
 }
 
 func (r *secretRepository) Create(ctx context.Context, s *entity.Secret) error {
+	return r.createSecret(ctx, r.db, s)
+}
+
+// createSecret runs the actual INSERT against whatever dbtx it's given
+// (r.db for the standalone Create path, a *sql.Tx for
+// CreateWithFirstVersion's atomic path) — the one place both callers'
+// INSERT logic lives, so they can never drift apart.
+//
+// A caller-supplied s.ID (Sprint 3 Phase 3's SecretService generates one
+// up front, before the row exists, so it can bind AES-GCM's additional
+// authenticated data to the secret's own identity during encryption — see
+// secrets.EncryptContext's doc comment) is used verbatim instead of
+// letting the database's own DEFAULT gen_random_uuid() generate one;
+// every existing caller that leaves s.ID empty (Phase 1's own tests, and
+// anything else that doesn't need the ID before Create returns) gets a
+// UUID generated here in Go instead, which is behaviorally identical — a
+// valid, randomly generated v4 UUID either way.
+func (r *secretRepository) createSecret(ctx context.Context, db dbtx, s *entity.Secret) error {
+	if s.ID == "" {
+		s.ID = util.NewUUID()
+	}
 	const q = `
-		INSERT INTO secrets (organization_id, path, created_by)
-		VALUES ($1, $2, $3)
+		INSERT INTO secrets (id, organization_id, path, created_by)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, current_version, created_at, updated_at`
-	err := r.db.QueryRowContext(ctx, q, s.OrganizationID, s.Path, s.CreatedBy).
+	err := db.QueryRowContext(ctx, q, s.ID, s.OrganizationID, s.Path, s.CreatedBy).
 		Scan(&s.ID, &s.CurrentVersion, &s.CreatedAt, &s.UpdatedAt)
 	return translateError(err)
 }
@@ -88,6 +110,46 @@ func (r *secretRepository) SoftDelete(ctx context.Context, id string) error {
 	return checkRowsAffected(res, err)
 }
 
+// CreateWithFirstVersion creates s and v (fixed to version 1) inside one
+// transaction. No row-lock is needed the way CreateVersion needs
+// `SELECT ... FOR UPDATE`: s is inserted for the first time in this same
+// transaction, so — thanks to Postgres's MVCC — no other transaction can
+// see it, let alone race to create a version for it, until this one
+// commits.
+func (r *secretRepository) CreateWithFirstVersion(ctx context.Context, s *entity.Secret, v *entity.SecretVersion) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is a no-op after a successful Commit
+
+	if err := r.createSecret(ctx, tx, s); err != nil {
+		return err
+	}
+
+	v.SecretID = s.ID
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO secret_versions (secret_id, version, ciphertext, nonce, auth_tag, algorithm, wrapped_dek, key_id, key_version, created_by)
+		VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, created_at`,
+		v.SecretID, v.Ciphertext, v.Nonce, v.AuthTag, v.Algorithm, v.WrappedDEK, v.KeyID,
+		toNullString(v.KeyVersion), v.CreatedBy,
+	).Scan(&v.ID, &v.CreatedAt)
+	if err != nil {
+		return translateError(err)
+	}
+	v.Version = 1
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE secrets SET current_version = 1, updated_at = now() WHERE id = $1`, s.ID)
+	if err := checkRowsAffected(res, err); err != nil {
+		return err
+	}
+	s.CurrentVersion = 1
+
+	return tx.Commit()
+}
+
 const secretVersionColumns = `id, secret_id, version, ciphertext, nonce, auth_tag, algorithm, wrapped_dek, key_id, key_version, created_by, created_at, deleted_at`
 
 func scanSecretVersion(row interface{ Scan(dest ...any) error }) (*entity.SecretVersion, error) {
@@ -109,22 +171,35 @@ func scanSecretVersion(row interface{ Scan(dest ...any) error }) (*entity.Secret
 
 // CreateVersion locks the parent secrets row, computes the next version
 // number from it, inserts the new secret_versions row and advances
-// secrets.current_version — all inside one transaction.
+// secrets.current_version — all inside one transaction. Equivalent to
+// CreateVersionIfCurrent with expectedCurrentVersion 0; see that method for
+// the full doc comment and both methods' shared implementation.
+func (r *secretRepository) CreateVersion(ctx context.Context, v *entity.SecretVersion) error {
+	return r.createVersion(ctx, v, 0)
+}
+
+// CreateVersionIfCurrent additionally enforces optimistic concurrency —
+// see the interface's own doc comment (internal/repository/secret.go) for
+// the contract; expectedCurrentVersion <= 0 means "no expectation".
 //
 // The `SELECT ... FOR UPDATE` is what actually prevents duplicate version
-// numbers under concurrency: two simultaneous CreateVersion calls for the
-// same secret_id serialize on that row lock, so the second call always
-// computes its next-version number from the first call's already-committed
-// current_version, never from a stale read. uq_secret_versions_secret_version
-// (migrations/000024) is the backstop behind that — it makes a duplicate
-// version number a constraint violation even if some future caller ever
-// reaches this table without going through this lock (e.g. a bug, or a
-// second write path added later), rather than silent data corruption.
+// numbers under concurrency, and is also what makes the optimistic
+// concurrency check race-free: two simultaneous calls for the same
+// secret_id serialize on that row lock, so the second call always reads
+// the first call's already-committed current_version — never a stale
+// value — before deciding whether to proceed or reject with
+// entity.ErrVersionConflict. uq_secret_versions_secret_version
+// (migrations/000024) remains the backstop behind the duplicate-version
+// half of that guarantee, independent of this check.
 //
 // Like refreshTokenRepository.Rotate, this only provides its atomicity
 // guarantee via BeginTx because secretRepository's db field is a concrete
 // *sql.DB — see the type's own comment.
-func (r *secretRepository) CreateVersion(ctx context.Context, v *entity.SecretVersion) error {
+func (r *secretRepository) CreateVersionIfCurrent(ctx context.Context, v *entity.SecretVersion, expectedCurrentVersion int) error {
+	return r.createVersion(ctx, v, expectedCurrentVersion)
+}
+
+func (r *secretRepository) createVersion(ctx context.Context, v *entity.SecretVersion, expectedCurrentVersion int) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -141,6 +216,9 @@ func (r *secretRepository) CreateVersion(ctx context.Context, v *entity.SecretVe
 	}
 	if err != nil {
 		return err
+	}
+	if expectedCurrentVersion > 0 && currentVersion != expectedCurrentVersion {
+		return entity.ErrVersionConflict
 	}
 	nextVersion := currentVersion + 1
 

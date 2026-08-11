@@ -15,18 +15,47 @@ import (
 // makes the alternative impossible to call, not because callers remember
 // not to.
 type SecretRepository interface {
+	// Create inserts a bare secret record — current_version 0, no versions
+	// yet. If s.ID is already set (a caller that needs the ID before the
+	// row exists — see CreateWithFirstVersion's own doc comment for why
+	// Sprint 3 Phase 3's SecretService needs exactly that), it is used
+	// verbatim instead of letting the database generate one.
 	Create(ctx context.Context, s *entity.Secret) error
 	GetByID(ctx context.Context, id string) (*entity.Secret, error)
 	GetByPath(ctx context.Context, organizationID, path string) (*entity.Secret, error)
 	List(ctx context.Context, organizationID string, f SecretFilter) ([]*entity.Secret, error)
 	SoftDelete(ctx context.Context, id string) error
 
+	// CreateWithFirstVersion atomically creates a new secret and its
+	// version 1 in one transaction: the secret row never exists without a
+	// version if this returns success, and neither exists at all if it
+	// returns an error. This is what a caller that must guarantee "no
+	// incomplete secret ever exists" (SecretService.CreateSecret) uses
+	// instead of calling Create then CreateVersion as two independent
+	// top-level calls — those two, taken separately, cannot give that
+	// guarantee: a failure between them would leave an orphaned secret row
+	// with zero versions. v.Version is fixed to 1 (ignoring any value the
+	// caller set); v.SecretID is set to s.ID. On return, s.ID (if not
+	// already set), s.CurrentVersion, s.CreatedAt, s.UpdatedAt, v.ID, and
+	// v.CreatedAt are all populated.
+	CreateWithFirstVersion(ctx context.Context, s *entity.Secret, v *entity.SecretVersion) error
+
 	// CreateVersion assigns and inserts the next version number for
 	// v.SecretID (ignoring any Version the caller set) and advances the
 	// parent secret's CurrentVersion to match, atomically — see
 	// postgres.secretRepository.CreateVersion for how. On return, v.ID,
-	// v.Version and v.CreatedAt are populated.
+	// v.Version and v.CreatedAt are populated. Equivalent to
+	// CreateVersionIfCurrent with expectedCurrentVersion 0 (no check).
 	CreateVersion(ctx context.Context, v *entity.SecretVersion) error
+	// CreateVersionIfCurrent behaves exactly like CreateVersion, but
+	// additionally enforces optimistic concurrency: inside the same row
+	// lock CreateVersion already takes, it checks the secret's
+	// CurrentVersion against expectedCurrentVersion before inserting — if
+	// they no longer match (another writer's update landed first), it
+	// rolls back and returns entity.ErrVersionConflict instead of
+	// proceeding. expectedCurrentVersion <= 0 means "no expectation",
+	// behaving exactly like CreateVersion.
+	CreateVersionIfCurrent(ctx context.Context, v *entity.SecretVersion, expectedCurrentVersion int) error
 	GetVersion(ctx context.Context, secretID string, version int) (*entity.SecretVersion, error)
 	GetCurrentVersion(ctx context.Context, secretID string) (*entity.SecretVersion, error)
 	ListVersions(ctx context.Context, secretID string) ([]*entity.SecretVersion, error)

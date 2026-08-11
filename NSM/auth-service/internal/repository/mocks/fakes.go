@@ -8,6 +8,8 @@ package mocks
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -574,4 +576,280 @@ func FakeRegistrationTx(users *FakeUserRepository, audit *FakeAuditLogRepository
 		}
 		return nil
 	}
+}
+
+// FakeAuditTx returns a closure structurally identical to
+// service.AuditTxFunc — see that type's own doc comment
+// (internal/service/auth_service.go) for why a real implementation needs
+// database.WithTx at all (the hash-chain advisory lock only serializes
+// inside a genuine transaction). This fake needs none of that: it just
+// calls fn directly against audit, no snapshot/restore. That's
+// deliberate, not a shortcut — every real AuditTxFunc caller in this
+// codebase that wraps a best-effort write (recordUserAudit,
+// recordLoginAudit, and Sprint 3 Phase 3's SecretService) treats a
+// failure here as loggable-and-swallowed, never as a reason to undo the
+// primary write it's describing, so there is nothing for this fake to
+// roll back to.
+func FakeAuditTx(audit *FakeAuditLogRepository) func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+	return func(ctx context.Context, fn func(repository.AuditLogRepository) error) error {
+		return fn(audit)
+	}
+}
+
+// FakeSecretRepository implements repository.SecretRepository over
+// in-memory maps — secrets keyed by ID, versions keyed by secret ID —
+// mirroring the real schema's two-table split (migrations/000024).
+type FakeSecretRepository struct {
+	mu       sync.Mutex
+	byID     map[string]*entity.Secret
+	versions map[string][]*entity.SecretVersion
+	// FailNextCreateVersion, if non-nil, is returned by the next
+	// CreateWithFirstVersion/CreateVersion/CreateVersionIfCurrent call
+	// instead of succeeding, then reset to nil — the same fault-injection
+	// convention as FakeAuditLogRepository.FailNext, for exercising "the
+	// version write failed, the secret must not be left half-created"
+	// without a real database.
+	FailNextCreateVersion error
+}
+
+func NewFakeSecretRepository() *FakeSecretRepository {
+	return &FakeSecretRepository{byID: map[string]*entity.Secret{}, versions: map[string][]*entity.SecretVersion{}}
+}
+
+// Seed inserts a secret directly, bypassing Create's ID assignment.
+func (f *FakeSecretRepository) Seed(s *entity.Secret) *entity.Secret {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s.ID == "" {
+		s.ID = util.NewUUID()
+	}
+	f.byID[s.ID] = s
+	return s
+}
+
+// SeedVersion inserts a version directly, for tests that need a specific
+// historical version present without going through CreateVersion.
+func (f *FakeSecretRepository) SeedVersion(v *entity.SecretVersion) *entity.SecretVersion {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v.ID == "" {
+		v.ID = util.NewUUID()
+	}
+	f.versions[v.SecretID] = append(f.versions[v.SecretID], v)
+	return v
+}
+
+func (f *FakeSecretRepository) Create(_ context.Context, s *entity.Secret) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createLocked(s)
+}
+
+// createLocked mirrors uq_secrets_org_path (case-insensitive, like the
+// real CITEXT column) so a unit test exercising duplicate-path behavior
+// gets the same entity.ErrAlreadyExists a real Postgres unique-violation
+// would produce, without needing a database. Caller must hold f.mu.
+func (f *FakeSecretRepository) createLocked(s *entity.Secret) error {
+	for _, existing := range f.byID {
+		if existing.DeletedAt != nil {
+			continue
+		}
+		if existing.OrganizationID == s.OrganizationID && strings.EqualFold(existing.Path, s.Path) {
+			return entity.ErrAlreadyExists
+		}
+	}
+	if s.ID == "" {
+		s.ID = util.NewUUID()
+	}
+	s.CreatedAt, s.UpdatedAt = time.Now(), time.Now()
+	f.byID[s.ID] = s
+	return nil
+}
+
+func (f *FakeSecretRepository) GetByID(_ context.Context, id string) (*entity.Secret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.byID[id]
+	if !ok || s.DeletedAt != nil {
+		return nil, entity.ErrNotFound
+	}
+	return s, nil
+}
+
+func (f *FakeSecretRepository) GetByPath(_ context.Context, organizationID, path string) (*entity.Secret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.byID {
+		if s.DeletedAt == nil && s.OrganizationID == organizationID && strings.EqualFold(s.Path, path) {
+			return s, nil
+		}
+	}
+	return nil, entity.ErrNotFound
+}
+
+func (f *FakeSecretRepository) List(_ context.Context, organizationID string, _ repository.SecretFilter) ([]*entity.Secret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.Secret
+	for _, s := range f.byID {
+		if s.DeletedAt == nil && s.OrganizationID == organizationID {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+func (f *FakeSecretRepository) SoftDelete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.byID[id]
+	if !ok || s.DeletedAt != nil {
+		return entity.ErrNotFound
+	}
+	now := time.Now()
+	s.DeletedAt, s.UpdatedAt = &now, now
+	return nil
+}
+
+func (f *FakeSecretRepository) CreateWithFirstVersion(_ context.Context, s *entity.Secret, v *entity.SecretVersion) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailNextCreateVersion != nil {
+		err := f.FailNextCreateVersion
+		f.FailNextCreateVersion = nil
+		return err
+	}
+	if err := f.createLocked(s); err != nil {
+		return err
+	}
+	v.SecretID, v.ID, v.Version, v.CreatedAt = s.ID, util.NewUUID(), 1, time.Now()
+	f.versions[s.ID] = []*entity.SecretVersion{v}
+	s.CurrentVersion = 1
+	return nil
+}
+
+func (f *FakeSecretRepository) CreateVersion(_ context.Context, v *entity.SecretVersion) error {
+	return f.createVersion(v, 0)
+}
+
+func (f *FakeSecretRepository) CreateVersionIfCurrent(_ context.Context, v *entity.SecretVersion, expectedCurrentVersion int) error {
+	return f.createVersion(v, expectedCurrentVersion)
+}
+
+func (f *FakeSecretRepository) createVersion(v *entity.SecretVersion, expectedCurrentVersion int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailNextCreateVersion != nil {
+		err := f.FailNextCreateVersion
+		f.FailNextCreateVersion = nil
+		return err
+	}
+	s, ok := f.byID[v.SecretID]
+	if !ok || s.DeletedAt != nil {
+		return entity.ErrNotFound
+	}
+	if expectedCurrentVersion > 0 && s.CurrentVersion != expectedCurrentVersion {
+		return entity.ErrVersionConflict
+	}
+	next := s.CurrentVersion + 1
+	v.ID, v.Version, v.CreatedAt = util.NewUUID(), next, time.Now()
+	f.versions[v.SecretID] = append(f.versions[v.SecretID], v)
+	s.CurrentVersion, s.UpdatedAt = next, time.Now()
+	return nil
+}
+
+func (f *FakeSecretRepository) GetVersion(_ context.Context, secretID string, version int) (*entity.SecretVersion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, v := range f.versions[secretID] {
+		if v.Version == version && v.DeletedAt == nil {
+			return v, nil
+		}
+	}
+	return nil, entity.ErrNotFound
+}
+
+func (f *FakeSecretRepository) GetCurrentVersion(ctx context.Context, secretID string) (*entity.SecretVersion, error) {
+	f.mu.Lock()
+	s, ok := f.byID[secretID]
+	f.mu.Unlock()
+	if !ok {
+		return nil, entity.ErrNotFound
+	}
+	return f.GetVersion(ctx, secretID, s.CurrentVersion)
+}
+
+func (f *FakeSecretRepository) ListVersions(_ context.Context, secretID string) ([]*entity.SecretVersion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.SecretVersion
+	for _, v := range f.versions[secretID] {
+		if v.DeletedAt == nil {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version > out[j].Version })
+	return out, nil
+}
+
+func (f *FakeSecretRepository) SoftDeleteVersion(_ context.Context, secretID string, version int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, v := range f.versions[secretID] {
+		if v.Version == version && v.DeletedAt == nil {
+			now := time.Now()
+			v.DeletedAt = &now
+			return nil
+		}
+	}
+	return entity.ErrNotFound
+}
+
+// FakeRBACRepository implements repository.RBACRepository over an
+// in-memory userID -> granted "resource:action" set — enough for
+// internal/service tests to construct a real *service.RBACService (see
+// NewRBACService) without a database, the same "fake the port, exercise
+// the real service logic" split every other fake in this file follows.
+// No rbac_service_test.go existed before Sprint 3 Phase 3 to already
+// provide one.
+type FakeRBACRepository struct {
+	mu    sync.Mutex
+	grant map[string]map[string]bool // userID -> "resource:action" -> true
+}
+
+func NewFakeRBACRepository() *FakeRBACRepository {
+	return &FakeRBACRepository{grant: map[string]map[string]bool{}}
+}
+
+// Grant gives userID the given "resource:action" permission — the
+// natural way a test arranges "given a user who holds secrets:create."
+func (f *FakeRBACRepository) Grant(userID, permission string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.grant[userID] == nil {
+		f.grant[userID] = map[string]bool{}
+	}
+	f.grant[userID][permission] = true
+}
+
+func (f *FakeRBACRepository) UserHasPermission(_ context.Context, userID, resource, action string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.grant[userID][resource+":"+action], nil
+}
+
+func (f *FakeRBACRepository) UserPermissions(_ context.Context, userID string) ([]*entity.Permission, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.Permission
+	for perm := range f.grant[userID] {
+		resource, action, _ := strings.Cut(perm, ":")
+		out = append(out, &entity.Permission{Resource: resource, Action: action})
+	}
+	return out, nil
+}
+
+func (f *FakeRBACRepository) CountUsersWithRole(_ context.Context, _ string) (int, error) {
+	return 0, nil
 }

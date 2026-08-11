@@ -21,4 +21,22 @@ var (
 	ErrSessionRevoked     = errors.New("session has been revoked")
 	ErrSessionExpired     = errors.New("session has expired")
 	ErrRateLimited        = errors.New("too many attempts")
+	// ErrForbidden means the caller is authenticated but lacks the
+	// permission a service-layer operation requires. Every other write in
+	// this codebase relies entirely on middleware.RequirePermission to
+	// reject an unauthorized request before a service method ever runs
+	// (see that middleware's own doc comment) — SecretService
+	// (Sprint 3 Phase 3) is the first service to perform its own RBAC
+	// check internally, because it must be safely callable — and safely
+	// reject an unauthorized caller — with no HTTP/middleware layer in
+	// front of it at all yet.
+	ErrForbidden = errors.New("insufficient permissions")
+	// ErrVersionConflict means an update supplied an expected current
+	// version that no longer matches — another writer's update already
+	// landed first. See repository.SecretRepository's
+	// CreateVersionIfCurrent for the transactional check that produces
+	// this, and SecretService.UpdateSecret for how a caller is expected to
+	// react (re-read the current version and retry, or surface a 409 to
+	// its own caller — never silently overwrite).
+	ErrVersionConflict = errors.New("secret was updated by someone else; expected version is stale")
 )
