@@ -41,16 +41,26 @@ func (p *multiKeyTestProvider) addKey(t *testing.T, keyID string) {
 	p.keys[keyID] = key
 }
 
-func (p *multiKeyTestProvider) GetCurrentKey(_ context.Context) ([]byte, string, error) {
-	return p.keys[p.currentID], p.currentID, nil
+func (p *multiKeyTestProvider) GetCurrentKey(ctx context.Context) ([]byte, string, error) {
+	key, err := p.GetKey(ctx, p.currentID)
+	return key, p.currentID, err
 }
 
+// GetKey returns a fresh copy of the stored key material, never the map's
+// own backing array — EncryptionService.Encrypt/Decrypt both deliberately
+// zero() whatever a KeyProvider hands back once they're done with it (see
+// encryption.go's own doc comment on that best-effort scrubbing). Handing
+// out an aliased slice here would let that zeroing silently corrupt this
+// provider's own stored key the first time it's used, exactly the bug
+// DevKeyProvider.copyKey() exists to prevent for the real implementation.
 func (p *multiKeyTestProvider) GetKey(_ context.Context, keyID string) ([]byte, error) {
 	key, ok := p.keys[keyID]
 	if !ok {
 		return nil, secrets.ErrKeyNotFound
 	}
-	return key, nil
+	out := make([]byte, len(key))
+	copy(out, key)
+	return out, nil
 }
 
 // TestKeyRotation_Simulation is Sprint 4 Task 1's rotation simulation,

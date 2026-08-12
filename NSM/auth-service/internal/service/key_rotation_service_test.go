@@ -40,16 +40,24 @@ func (p *fakeRotationProvider) addKey(t *testing.T, keyID string) {
 	p.keys[keyID] = key
 }
 
-func (p *fakeRotationProvider) GetCurrentKey(_ context.Context) ([]byte, string, error) {
-	return p.keys[p.current], p.current, nil
+func (p *fakeRotationProvider) GetCurrentKey(ctx context.Context) ([]byte, string, error) {
+	key, err := p.GetKey(ctx, p.current)
+	return key, p.current, err
 }
 
+// GetKey returns a defensive copy — see test/integration/key_rotation_test.go's
+// multiKeyTestProvider.GetKey for why an aliased slice here would be a
+// latent bug (EncryptionService zeroes whatever a KeyProvider returns).
+// This test double doesn't exercise Encrypt/Decrypt today, but copying
+// here keeps it safe if a future test does.
 func (p *fakeRotationProvider) GetKey(_ context.Context, keyID string) ([]byte, error) {
 	key, ok := p.keys[keyID]
 	if !ok {
 		return nil, secrets.ErrKeyNotFound
 	}
-	return key, nil
+	out := make([]byte, len(key))
+	copy(out, key)
+	return out, nil
 }
 
 // testKeyRotationEnv mirrors testSecretEnv's shape for KeyRotationService.
