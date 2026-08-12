@@ -870,3 +870,228 @@ func (f *FakeRBACRepository) UserPermissions(_ context.Context, userID string) (
 func (f *FakeRBACRepository) CountUsersWithRole(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+
+// FakeSecretPolicyRepository implements repository.SecretPolicyRepository
+// over in-memory maps — the same "fake the port, exercise real service
+// logic" split every other fake in this file follows, this time for
+// Sprint 4 Task 2's path-authorization schema.
+type FakeSecretPolicyRepository struct {
+	mu          sync.Mutex
+	policies    map[string]*entity.SecretPolicy
+	rules       map[string][]*entity.SecretPolicyRule // policyID -> rules
+	assignments map[string]map[string]bool            // policyID -> roleID -> true
+}
+
+func NewFakeSecretPolicyRepository() *FakeSecretPolicyRepository {
+	return &FakeSecretPolicyRepository{
+		policies:    map[string]*entity.SecretPolicy{},
+		rules:       map[string][]*entity.SecretPolicyRule{},
+		assignments: map[string]map[string]bool{},
+	}
+}
+
+// SeedPolicy inserts p directly, assigning an ID if it doesn't have one —
+// the natural way a test arranges "given a policy that already exists."
+func (f *FakeSecretPolicyRepository) SeedPolicy(p *entity.SecretPolicy) *entity.SecretPolicy {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p.ID == "" {
+		p.ID = util.NewUUID()
+	}
+	f.policies[p.ID] = p
+	return p
+}
+
+// SeedRule attaches a rule to policyID, assigning an ID if it doesn't
+// have one.
+func (f *FakeSecretPolicyRepository) SeedRule(policyID string, rule *entity.SecretPolicyRule) *entity.SecretPolicyRule {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rule.ID == "" {
+		rule.ID = util.NewUUID()
+	}
+	rule.PolicyID = policyID
+	f.rules[policyID] = append(f.rules[policyID], rule)
+	return rule
+}
+
+// AssignRole assigns policyID to roleID directly, bypassing the RBAC
+// permission check AssignToRole's real caller (SecretPolicyService)
+// would otherwise enforce — the natural way a test arranges "given a
+// role that already holds this policy."
+func (f *FakeSecretPolicyRepository) AssignRole(policyID, roleID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.assignments[policyID] == nil {
+		f.assignments[policyID] = map[string]bool{}
+	}
+	f.assignments[policyID][roleID] = true
+}
+
+// GrantFullAccessToRole seeds a policy matching migrations/000027's own
+// backward-compatibility default (path pattern "*", every action, effect
+// allow) and assigns it to roleID in one call — the fake's equivalent of
+// that migration's seed, so a test can grant "this role can reach every
+// secret path" in one line without constructing the policy/rule/
+// assignment rows by hand.
+func (f *FakeSecretPolicyRepository) GrantFullAccessToRole(roleID string) {
+	p := f.SeedPolicy(&entity.SecretPolicy{Name: "test-full-access"})
+	f.SeedRule(p.ID, &entity.SecretPolicyRule{
+		PathPattern: "*",
+		Effect:      entity.PolicyEffectAllow,
+		Actions:     []entity.PolicyAction{entity.PolicyActionRead, entity.PolicyActionCreate, entity.PolicyActionUpdate, entity.PolicyActionDelete, entity.PolicyActionList},
+	})
+	f.AssignRole(p.ID, roleID)
+}
+
+func (f *FakeSecretPolicyRepository) Create(_ context.Context, p *entity.SecretPolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.policies {
+		orgMatch := (existing.OrganizationID == nil) == (p.OrganizationID == nil)
+		if orgMatch && existing.OrganizationID != nil && p.OrganizationID != nil {
+			orgMatch = *existing.OrganizationID == *p.OrganizationID
+		}
+		if orgMatch && existing.Name == p.Name {
+			return entity.ErrAlreadyExists
+		}
+	}
+	p.ID = util.NewUUID()
+	p.CreatedAt, p.UpdatedAt = time.Now(), time.Now()
+	f.policies[p.ID] = p
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) GetByID(_ context.Context, id string) (*entity.SecretPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.policies[id]
+	if !ok {
+		return nil, entity.ErrNotFound
+	}
+	return p, nil
+}
+
+func (f *FakeSecretPolicyRepository) List(_ context.Context, organizationID string) ([]*entity.SecretPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.SecretPolicy
+	for _, p := range f.policies {
+		if p.OrganizationID == nil || *p.OrganizationID == organizationID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (f *FakeSecretPolicyRepository) Update(_ context.Context, p *entity.SecretPolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	existing, ok := f.policies[p.ID]
+	if !ok {
+		return entity.ErrNotFound
+	}
+	existing.Name, existing.Description, existing.UpdatedAt = p.Name, p.Description, time.Now()
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) Delete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.policies[id]; !ok {
+		return entity.ErrNotFound
+	}
+	delete(f.policies, id)
+	delete(f.rules, id)
+	delete(f.assignments, id)
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) ReplaceRules(_ context.Context, policyID string, rules []*entity.SecretPolicyRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.policies[policyID]; !ok {
+		return entity.ErrNotFound
+	}
+	out := make([]*entity.SecretPolicyRule, len(rules))
+	for i, r := range rules {
+		cp := *r
+		cp.ID = util.NewUUID()
+		cp.PolicyID = policyID
+		cp.CreatedAt = time.Now()
+		out[i] = &cp
+	}
+	f.rules[policyID] = out
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) ListRules(_ context.Context, policyID string) ([]*entity.SecretPolicyRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rules[policyID], nil
+}
+
+func (f *FakeSecretPolicyRepository) AssignToRole(_ context.Context, a *entity.SecretPolicyRoleAssignment) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.policies[a.PolicyID]; !ok {
+		return entity.ErrNotFound
+	}
+	if f.assignments[a.PolicyID] == nil {
+		f.assignments[a.PolicyID] = map[string]bool{}
+	}
+	f.assignments[a.PolicyID][a.RoleID] = true
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) UnassignFromRole(_ context.Context, policyID, roleID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.assignments[policyID][roleID] {
+		return entity.ErrNotFound
+	}
+	delete(f.assignments[policyID], roleID)
+	return nil
+}
+
+func (f *FakeSecretPolicyRepository) ListAssignedRoleIDs(_ context.Context, policyID string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var ids []string
+	for roleID := range f.assignments[policyID] {
+		ids = append(ids, roleID)
+	}
+	return ids, nil
+}
+
+func (f *FakeSecretPolicyRepository) ListRulesForRoles(_ context.Context, organizationID string, roleIDs []string) ([]*entity.SecretPolicyRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	roleSet := make(map[string]bool, len(roleIDs))
+	for _, id := range roleIDs {
+		roleSet[id] = true
+	}
+
+	var out []*entity.SecretPolicyRule
+	for policyID, roleAssignments := range f.assignments {
+		policy, ok := f.policies[policyID]
+		if !ok {
+			continue
+		}
+		if policy.OrganizationID != nil && *policy.OrganizationID != organizationID {
+			continue
+		}
+		assigned := false
+		for roleID := range roleAssignments {
+			if roleSet[roleID] {
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			continue
+		}
+		out = append(out, f.rules[policyID]...)
+	}
+	return out, nil
+}

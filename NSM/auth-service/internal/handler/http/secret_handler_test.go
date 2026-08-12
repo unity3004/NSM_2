@@ -40,6 +40,9 @@ func newTestSecretHandler(t *testing.T) *secretHandler {
 	repo := mocks.NewFakeSecretRepository()
 	rbacRepo := mocks.NewFakeRBACRepository()
 	rbacSvc := service.NewRBACService(rbacRepo)
+	users := mocks.NewFakeUserRepository()
+	policyRepo := mocks.NewFakeSecretPolicyRepository()
+	policySvc := service.NewSecretPolicyService(policyRepo, users, rbacSvc, nil)
 	audit := mocks.NewFakeAuditLogRepository()
 	auditTx := mocks.FakeAuditTx(audit)
 
@@ -53,7 +56,7 @@ func newTestSecretHandler(t *testing.T) *secretHandler {
 	}
 	enc := secrets.NewEncryptionService(provider)
 
-	svc := service.NewSecretService(repo, enc, rbacSvc, auditTx)
+	svc := service.NewSecretService(repo, enc, rbacSvc, policySvc, auditTx)
 	return &secretHandler{svc: svc}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
+	"github.com/acme/auth-service/internal/policy"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/secrets"
 	"github.com/acme/auth-service/internal/util"
@@ -67,17 +68,22 @@ var ErrEmptyPayload = errors.New("service: secret payload must not be empty")
 // operates on. An ActorUserID of "" is treated as no authenticated
 // identity at all and rejected outright, before RBAC is even consulted.
 type SecretService struct {
-	repo    repository.SecretRepository
-	enc     *secrets.EncryptionService
-	rbac    *RBACService
-	auditTx AuditTxFunc
+	repo     repository.SecretRepository
+	enc      *secrets.EncryptionService
+	rbac     *RBACService
+	policies *SecretPolicyService
+	auditTx  AuditTxFunc
 }
 
-// NewSecretService constructs a SecretService. auditTx may be nil (the
-// same allowance every other AuditTx dependency in this codebase makes) —
-// every write still succeeds, it just doesn't get an audit trail entry.
-func NewSecretService(repo repository.SecretRepository, enc *secrets.EncryptionService, rbac *RBACService, auditTx AuditTxFunc) *SecretService {
-	return &SecretService{repo: repo, enc: enc, rbac: rbac, auditTx: auditTx}
+// NewSecretService constructs a SecretService. policies is required, not
+// optional like auditTx (nil would defeat Sprint 4 Task 2's deny-by-default
+// requirement outright — every method below calls
+// authorizeSecretAccess, which always consults it) — see that method's
+// own doc comment for the full "global permission, then path policy"
+// authorization flow this adds on top of the RBAC check that already
+// existed.
+func NewSecretService(repo repository.SecretRepository, enc *secrets.EncryptionService, rbac *RBACService, policies *SecretPolicyService, auditTx AuditTxFunc) *SecretService {
+	return &SecretService{repo: repo, enc: enc, rbac: rbac, policies: policies, auditTx: auditTx}
 }
 
 // SecretMetadata is what every method below returns about a secret except
@@ -123,12 +129,8 @@ type CreateSecretInput struct {
 // method's own doc comment for why Create+CreateVersion as two
 // independent calls could not give this guarantee.
 func (s *SecretService) CreateSecret(ctx context.Context, in CreateSecretInput) (SecretMetadata, error) {
-	if err := s.authorize(ctx, in.ActorUserID, permSecretsCreate); err != nil {
-		return SecretMetadata{}, err
-	}
-
-	path := util.NormalizeSecretPath(in.Path)
-	if err := util.ValidateSecretPath(path); err != nil {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsCreate, in.Path, in.IPAddress, policy.ActionCreate)
+	if err != nil {
 		return SecretMetadata{}, err
 	}
 	if len(in.Payload) == 0 {
@@ -213,12 +215,8 @@ type SecretValue struct {
 // caller who lacks secrets:read learns nothing about whether a path
 // exists, let alone its value.
 func (s *SecretService) GetSecret(ctx context.Context, in GetSecretInput) (SecretValue, error) {
-	if err := s.authorize(ctx, in.ActorUserID, permSecretsRead); err != nil {
-		return SecretValue{}, err
-	}
-
-	path := util.NormalizeSecretPath(in.Path)
-	if err := util.ValidateSecretPath(path); err != nil {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsRead, in.Path, in.IPAddress, policy.ActionRead)
+	if err != nil {
 		return SecretValue{}, err
 	}
 
@@ -294,16 +292,12 @@ type UpdateSecretInput struct {
 // pathway to a stored row whose AAD version disagrees with its actual
 // version column.
 func (s *SecretService) UpdateSecret(ctx context.Context, in UpdateSecretInput) (SecretMetadata, error) {
-	if err := s.authorize(ctx, in.ActorUserID, permSecretsUpdate); err != nil {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsUpdate, in.Path, in.IPAddress, policy.ActionUpdate)
+	if err != nil {
 		return SecretMetadata{}, err
 	}
 	if in.ExpectedVersion <= 0 {
 		return SecretMetadata{}, fmt.Errorf("service: UpdateSecret requires a positive ExpectedVersion")
-	}
-
-	path := util.NormalizeSecretPath(in.Path)
-	if err := util.ValidateSecretPath(path); err != nil {
-		return SecretMetadata{}, err
 	}
 	if len(in.Payload) == 0 {
 		return SecretMetadata{}, ErrEmptyPayload
@@ -359,12 +353,8 @@ type DeleteSecretInput struct {
 // deleted_at IS NULL) — "normal read" cannot see a deleted secret.
 // Permanent destruction is not implemented in this phase.
 func (s *SecretService) DeleteSecret(ctx context.Context, in DeleteSecretInput) error {
-	if err := s.authorize(ctx, in.ActorUserID, permSecretsDelete); err != nil {
-		return err
-	}
-
-	path := util.NormalizeSecretPath(in.Path)
-	if err := util.ValidateSecretPath(path); err != nil {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsDelete, in.Path, in.IPAddress, policy.ActionDelete)
+	if err != nil {
 		return err
 	}
 
@@ -389,8 +379,19 @@ type ListSecretsInput struct {
 }
 
 // ListSecrets returns metadata only — path, current version, timestamps —
-// for every active secret in OrganizationID. Never a payload, ciphertext,
-// nonce, or key ID: SecretMetadata has no field any of those could occupy.
+// for every active secret in OrganizationID that in.ActorUserID's roles
+// hold a matching policy.ActionList policy for. Never a payload,
+// ciphertext, nonce, or key ID: SecretMetadata has no field any of those
+// could occupy.
+//
+// This is the one method that filters rather than allow/denies the whole
+// call — see the objective's own LIST AUTHORIZATION section: a caller
+// with secrets:list but no policy for a given path must never see that
+// path's metadata, exactly the way an unauthorized GET /v1/secrets/{path}
+// never reveals whether that path exists at all. Rules are resolved once
+// (SecretPolicyService.FilterAllowedPaths), not once per secret in the
+// list — see that method's own doc comment on why this scales with the
+// caller's rule count, not the secret count.
 func (s *SecretService) ListSecrets(ctx context.Context, in ListSecretsInput) ([]SecretMetadata, error) {
 	if err := s.authorize(ctx, in.ActorUserID, permSecretsList); err != nil {
 		return nil, err
@@ -399,9 +400,26 @@ func (s *SecretService) ListSecrets(ctx context.Context, in ListSecretsInput) ([
 	if err != nil {
 		return nil, err
 	}
-	out := make([]SecretMetadata, len(list))
+
+	paths := make([]string, len(list))
 	for i, sec := range list {
-		out[i] = secretMetadataFromEntity(sec)
+		paths[i] = sec.Path
+	}
+	allowedPaths, err := s.policies.FilterAllowedPaths(ctx, in.ActorUserID, in.OrganizationID, paths, policy.ActionList)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]bool, len(allowedPaths))
+	for _, p := range allowedPaths {
+		allowed[p] = true
+	}
+
+	out := make([]SecretMetadata, 0, len(list))
+	for _, sec := range list {
+		if !allowed[sec.Path] {
+			continue
+		}
+		out = append(out, secretMetadataFromEntity(sec))
 	}
 	return out, nil
 }
@@ -426,6 +444,100 @@ func (s *SecretService) authorize(ctx context.Context, actorUserID, permission s
 		return entity.ErrForbidden
 	}
 	return nil
+}
+
+// authorizeSecretAccess is Sprint 4 Task 2's layered authorization gate —
+// every write and single-secret read method below calls this instead of
+// authorize directly. It enforces, in order:
+//
+//  1. The existing global secrets:* permission check (authorize, above,
+//     unchanged) — "If user lacks secrets:read, Result: DENY even if a
+//     path policy exists," per the objective. A caller who fails this
+//     step is rejected before a path is even normalized, exactly as
+//     before this task.
+//  2. Path normalization and validation (util.NormalizeSecretPath/
+//     ValidateSecretPath — the same functions, and therefore the same
+//     rules, CreateSecret/GetSecret/UpdateSecret/DeleteSecret already
+//     applied before this task; nothing about canonicalization changed).
+//  3. The new path-policy check (SecretPolicyService.Authorize) against
+//     the canonical path — deny-by-default: a caller with the global
+//     permission but no matching policy is still rejected.
+//
+// Returns the canonical path on success, so every caller below uses the
+// exact same normalized string for its subsequent repository call — there
+// is no way for the path a caller was authorized against to differ from
+// the path it then acts on.
+//
+// A denial from either layer returns the identical entity.ErrForbidden a
+// caller has always seen from this service — a client can no more
+// distinguish "wrong permission" from "wrong path" than it could
+// previously distinguish "not logged in" from "logged in but not
+// allowed" (see authorize's own doc comment). This is deliberate: telling
+// an unauthorized caller *which* layer rejected them, or that a path
+// policy exists for that path at all, would be exactly the kind of
+// "secret exists but you aren't allowed to access it" information leak
+// the objective's ERROR RESPONSES section prohibits.
+//
+// A denial at either layer is audited (recordAccessDenied) before this
+// returns — the objective's own AUDIT section requires denied secret
+// access to be recorded (identity, action, canonical path, result,
+// timestamp), which neither layer produced before this task: a rejected
+// caller previously left no trail at all. The audited path is always the
+// normalized one, even for a permission-layer denial reached before
+// validation below — best-effort normalization purely for a readable
+// audit row, never a claim that the raw input was itself valid.
+func (s *SecretService) authorizeSecretAccess(ctx context.Context, actorUserID, organizationID, permission, rawPath, ipAddress string, action policy.Action) (string, error) {
+	if err := s.authorize(ctx, actorUserID, permission); err != nil {
+		s.recordAccessDenied(ctx, actorUserID, util.NormalizeSecretPath(rawPath), action, ipAddress)
+		return "", err
+	}
+
+	path := util.NormalizeSecretPath(rawPath)
+	if err := util.ValidateSecretPath(path); err != nil {
+		return "", err
+	}
+
+	allowed, err := s.policies.Authorize(ctx, actorUserID, organizationID, path, action)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		s.recordAccessDenied(ctx, actorUserID, path, action, ipAddress)
+		return "", entity.ErrForbidden
+	}
+	return path, nil
+}
+
+// recordAccessDenied is authorizeSecretAccess's own denial-path audit
+// call, best-effort like every other audit call in this service (see
+// recordSecretAudit's own doc comment). metadata carries only the
+// canonical path and the requested action — never a secret ID: whether a
+// secret actually exists at this path is exactly what an unauthorized
+// caller must not learn, even indirectly through its own audit trail row
+// (see authorizeSecretAccess's own doc comment on that information-leak
+// concern). action is recorded as "secret.access_denied" regardless of
+// which layer rejected the caller, for the identical reason the returned
+// error is always the same entity.ErrForbidden.
+func (s *SecretService) recordAccessDenied(ctx context.Context, actorUserID, path string, action policy.Action, ipAddress string) {
+	if s.auditTx == nil {
+		return
+	}
+	err := s.auditTx(ctx, func(audit repository.AuditLogRepository) error {
+		return audit.Append(ctx, &entity.AuditLogEntry{
+			ActorType:    entity.AuditActorUser,
+			ActorID:      strPtr(actorUserID),
+			Action:       "secret.access_denied",
+			ResourceType: strPtr("secret_path"),
+			ResourceID:   strPtr(path),
+			Result:       entity.AuditResultDenied,
+			IPAddress:    strPtr(ipAddress),
+			Metadata:     map[string]any{"path": path, "action": string(action)},
+		})
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error("failed to record audit event",
+			zap.String("action", "secret.access_denied"), zap.Error(err))
+	}
 }
 
 // recordSecretAudit is best-effort — it never surfaces a failure to the

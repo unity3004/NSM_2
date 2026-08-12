@@ -251,11 +251,19 @@ func main() {
 	// not registering /v1/secrets* at all (see NewRouter), rather than
 	// this binary refusing to start or those routes panicking.
 	var secretSvc *service.SecretService
+	var secretPolicySvc *service.SecretPolicyService
 	var keyRotationSvc *service.KeyRotationService
 	if cfg.Secrets.DevMasterKey == "" {
 		logger.Warn("AUTH_SECRETS_DEV_MASTER_KEY not set — Secrets Engine disabled, /v1/secrets routes will not be registered")
 	} else {
 		secretRepo := postgres.NewSecretRepository(db)
+		// Sprint 4 Task 2: the path-authorization layer SecretService now
+		// requires — see SecretService.authorizeSecretAccess's own doc
+		// comment. Wired here, not left nil, in every deployment that has
+		// the Secrets Engine enabled at all: deny-by-default only means
+		// something if this is actually consulted.
+		secretPolicyRepo := postgres.NewSecretPolicyRepository(db)
+		secretPolicySvc = service.NewSecretPolicyService(secretPolicyRepo, userRepo, rbacSvc, loginAuditTx)
 		keyProvider, err := secrets.NewDevKeyProvider(cfg.Secrets.DevMasterKeyID, cfg.Secrets.DevMasterKey)
 		if err != nil {
 			logger.Error("failed to construct secrets key provider", zap.Error(err))
@@ -280,7 +288,7 @@ func main() {
 		// writes are best-effort/single-repository the same way every other
 		// consumer of this closure's writes already are (see
 		// SecretService.recordSecretAudit's doc comment).
-		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, loginAuditTx)
+		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, secretPolicySvc, loginAuditTx)
 
 		keyRotationSvc = service.NewKeyRotationService(keyManager, secretRepo, loginAuditTx)
 		// Explicit at startup, not left to happen lazily on the first
@@ -304,6 +312,7 @@ func main() {
 		RoleService:         roleSvc,
 		RBACService:         rbacSvc,
 		SecretService:       secretSvc,
+		SecretPolicyService: secretPolicySvc,
 		TokenAuth:           tokenSigner,
 		AccessTokens:        accessTokens,
 		AccessTokenAudience: cfg.AccessToken.DefaultAudience,

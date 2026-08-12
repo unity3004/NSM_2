@@ -40,7 +40,14 @@ type RouterDeps struct {
 	// which case the routes below are simply never registered, rather
 	// than panicking on a nil service the first time one of them runs.
 	SecretService *service.SecretService
-	TokenAuth     *util.JWTSigner
+	// SecretPolicyService backs /v1/secret-policies* (Sprint 4 Task 2) —
+	// path-scoped secret authorization policy administration. May be nil
+	// under the same condition SecretService may be nil (see that field's
+	// own comment): cmd/server/main.go only constructs one when the
+	// Secrets Engine's key material is configured, since a policy with
+	// nothing to authorize access to has no reason to exist.
+	SecretPolicyService *service.SecretPolicyService
+	TokenAuth           *util.JWTSigner
 	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
 	// (Milestone 6A) — the first route in this router to actually require
 	// it, since it's the first milestone with a concrete reason to.
@@ -151,6 +158,29 @@ func NewRouter(deps RouterDeps) http.Handler {
 		mux.Handle("GET /v1/secrets/{path...}", requirePermission("secrets:read", secrets.get))
 		mux.Handle("PUT /v1/secrets/{path...}", requirePermission("secrets:update", secrets.update))
 		mux.Handle("DELETE /v1/secrets/{path...}", requirePermission("secrets:delete", secrets.delete))
+	}
+
+	// --- secret path-authorization policy administration (Sprint 4 Task
+	// 2): gated on the secret_policies:* permission catalog
+	// (migrations/000028), deliberately separate from secrets:* — a role
+	// that can read/write secret values is not automatically a role that
+	// can decide which paths other roles may reach (see
+	// service.SecretPolicyService's own doc comment). SecretPolicyService
+	// also performs its own internal RBAC check, the same defense-in-depth
+	// double-gate secrets themselves already have — see that service's
+	// authorize helper. Registered under the identical "nil means don't
+	// route it" guard as /v1/secrets, since a policy service with no
+	// Secrets Engine to protect has nothing to administer. ---
+	if deps.SecretPolicyService != nil {
+		policies := &secretPolicyHandler{svc: deps.SecretPolicyService}
+		mux.Handle("POST /v1/secret-policies", requirePermission("secret_policies:create", policies.create))
+		mux.Handle("GET /v1/secret-policies", requirePermission("secret_policies:read", policies.list))
+		mux.Handle("GET /v1/secret-policies/{policyId}", requirePermission("secret_policies:read", policies.get))
+		mux.Handle("PUT /v1/secret-policies/{policyId}", requirePermission("secret_policies:update", policies.update))
+		mux.Handle("DELETE /v1/secret-policies/{policyId}", requirePermission("secret_policies:delete", policies.delete))
+		mux.Handle("GET /v1/secret-policies/{policyId}/assignments", requirePermission("secret_policies:read", policies.listAssignments))
+		mux.Handle("POST /v1/secret-policies/{policyId}/assignments", requirePermission("secret_policies:assign", policies.assign))
+		mux.Handle("DELETE /v1/secret-policies/{policyId}/assignments/{roleId}", requirePermission("secret_policies:assign", policies.unassign))
 	}
 
 	var handler http.Handler = mux

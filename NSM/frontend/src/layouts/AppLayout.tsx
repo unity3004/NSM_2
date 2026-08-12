@@ -27,6 +27,7 @@ import {
   KeyRound,
   Users as UsersIcon,
   ShieldCheck as RolesIcon,
+  Lock as PoliciesIcon,
   ScrollText,
   Settings as SettingsIcon,
   LogOut,
@@ -51,6 +52,11 @@ const navItems = [
   // "hide what the real backend would refuse anyway" convention every
   // other gated item here already follows.
   { to: "/secrets", label: "Secrets", icon: KeyRound, permission: "secrets:list" },
+  // Sprint 4 Task 2: gated on secret_policies:read, matching GET
+  // /v1/secret-policies' own backend permission requirement exactly
+  // (router.go) — the same "hide what the real backend would refuse
+  // anyway" convention every other gated item here already follows.
+  { to: "/secret-policies", label: "Secret policies", icon: PoliciesIcon, permission: "secret_policies:read" },
 ] as const
 
 // Shown but disabled — the sidebar's information architecture is honest
@@ -66,6 +72,7 @@ const pageTitles: Record<string, string> = {
   "/users": "Users",
   "/roles": "Roles",
   "/secrets": "Secrets",
+  "/secret-policies": "Secret policies",
 }
 
 export function AppLayout() {

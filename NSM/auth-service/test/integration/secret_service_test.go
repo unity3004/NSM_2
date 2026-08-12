@@ -34,6 +34,8 @@ func newTestSecretServiceEnv(t *testing.T, db *sql.DB) *service.SecretService {
 	rbacRepo := postgres.NewRBACRepository(db)
 	rbacSvc := service.NewRBACService(rbacRepo)
 	secretRepo := postgres.NewSecretRepository(db)
+	userRepo := postgres.NewUserRepository(db)
+	secretPolicyRepo := postgres.NewSecretPolicyRepository(db)
 
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
@@ -50,8 +52,9 @@ func newTestSecretServiceEnv(t *testing.T, db *sql.DB) *service.SecretService {
 			return fn(postgres.NewAuditLogRepository(tx))
 		})
 	}
+	secretPolicySvc := service.NewSecretPolicyService(secretPolicyRepo, userRepo, rbacSvc, auditTx)
 
-	return service.NewSecretService(secretRepo, enc, rbacSvc, auditTx)
+	return service.NewSecretService(secretRepo, enc, rbacSvc, secretPolicySvc, auditTx)
 }
 
 // seedActorWithRole creates a real user (via the real UserRepository) and

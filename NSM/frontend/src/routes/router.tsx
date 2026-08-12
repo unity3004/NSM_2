@@ -8,6 +8,7 @@ import { DashboardPage } from "@/pages/DashboardPage"
 import { UsersPage } from "@/pages/UsersPage"
 import { RolesPage } from "@/pages/RolesPage"
 import { SecretsPage } from "@/pages/SecretsPage"
+import { SecretPoliciesPage } from "@/pages/SecretPoliciesPage"
 
 export const router = createBrowserRouter([
   { path: "/", element: <Navigate to="/dashboard" replace /> },
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
           { path: "/users", element: <UsersPage /> },
           { path: "/roles", element: <RolesPage /> },
           { path: "/secrets", element: <SecretsPage /> },
+          { path: "/secret-policies", element: <SecretPoliciesPage /> },
         ],
       },
     ],

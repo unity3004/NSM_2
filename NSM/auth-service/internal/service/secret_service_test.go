@@ -27,11 +27,14 @@ const (
 // actually persisted/audited without going through the service's own
 // (deliberately narrow) return types.
 type testSecretEnv struct {
-	svc   *SecretService
-	repo  *mocks.FakeSecretRepository
-	rbac  *mocks.FakeRBACRepository
-	audit *mocks.FakeAuditLogRepository
-	enc   *secrets.EncryptionService
+	svc       *SecretService
+	repo      *mocks.FakeSecretRepository
+	rbac      *mocks.FakeRBACRepository
+	users     *mocks.FakeUserRepository
+	policies  *mocks.FakeSecretPolicyRepository
+	policySvc *SecretPolicyService
+	audit     *mocks.FakeAuditLogRepository
+	enc       *secrets.EncryptionService
 	// rawKey is the decoded 32-byte AES key backing enc's DevKeyProvider —
 	// captured here (never exposed by secrets.KeyProvider itself, by
 	// design) purely so TestSecretService_AuditNeverContainsPlaintextOrKeys
@@ -49,16 +52,35 @@ func newTestKey(t *testing.T) []byte {
 	return key
 }
 
+// testFullAccessRoleID is the fake role newTestSecretEnv grants ownerID
+// and readerID — carrying a policy equivalent to migrations/000027's own
+// backward-compatibility default (path "*", every action, allow). This is
+// what keeps every test written before Sprint 4 Task 2 existed passing
+// unchanged: the global secrets:* permission grants below still gate
+// which actions each user may attempt, exactly as before, and this role's
+// full-access policy means the new path-policy layer never itself
+// becomes the reason an existing test's expectation changes. Tests that
+// exist specifically to exercise path-restricted policies construct their
+// own narrower policy instead of using this role — see
+// TestSecretService_PathPolicy* below.
+const testFullAccessRoleID = "role-full-access"
+
 // newTestSecretEnv wires a SecretService against in-memory fakes and a
 // real secrets.EncryptionService (real AES-256-GCM, a freshly generated
 // test-only key) — no database, real business logic, real cryptography.
 // ownerID and readerID are pre-granted every secrets:* permission and
-// secrets:read respectively; nobodyID is deliberately granted nothing.
+// secrets:read respectively (unchanged from before Task 2), plus
+// testFullAccessRoleID's full-access path policy (new — see that
+// constant's own doc comment); nobodyID is deliberately granted nothing
+// at either layer.
 func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	t.Helper()
 	repo := mocks.NewFakeSecretRepository()
 	rbacRepo := mocks.NewFakeRBACRepository()
 	rbacSvc := NewRBACService(rbacRepo)
+	users := mocks.NewFakeUserRepository()
+	policyRepo := mocks.NewFakeSecretPolicyRepository()
+	policySvc := NewSecretPolicyService(policyRepo, users, rbacSvc, nil)
 	audit := mocks.NewFakeAuditLogRepository()
 	auditTx := mocks.FakeAuditTx(audit)
 
@@ -76,8 +98,16 @@ func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	rbacRepo.Grant(ownerID, permSecretsList)
 	rbacRepo.Grant(readerID, permSecretsRead)
 
-	svc := NewSecretService(repo, enc, rbacSvc, auditTx)
-	return &testSecretEnv{svc: svc, repo: repo, rbac: rbacRepo, audit: audit, enc: enc, rawKey: rawKey}
+	policyRepo.GrantFullAccessToRole(testFullAccessRoleID)
+	if err := users.GrantRole(t.Context(), &entity.UserRole{UserID: ownerID, RoleID: testFullAccessRoleID}); err != nil {
+		t.Fatalf("GrantRole(owner): %v", err)
+	}
+	if err := users.GrantRole(t.Context(), &entity.UserRole{UserID: readerID, RoleID: testFullAccessRoleID}); err != nil {
+		t.Fatalf("GrantRole(reader): %v", err)
+	}
+
+	svc := NewSecretService(repo, enc, rbacSvc, policySvc, auditTx)
+	return &testSecretEnv{svc: svc, repo: repo, rbac: rbacRepo, users: users, policies: policyRepo, policySvc: policySvc, audit: audit, enc: enc, rawKey: rawKey}
 }
 
 // newTestKeyBase64 is the standalone form TestSecretService_WrongKey_FailsSafely
@@ -254,7 +284,7 @@ func TestSecretService_WrongKey_FailsSafely(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewDevKeyProvider: %v", err)
 		}
-		otherSvc := NewSecretService(env.repo, secrets.NewEncryptionService(otherProvider), NewRBACService(env.rbac), nil)
+		otherSvc := NewSecretService(env.repo, secrets.NewEncryptionService(otherProvider), NewRBACService(env.rbac), env.policySvc, nil)
 
 		_, err = otherSvc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/db", ActorUserID: readerID})
 		if !errors.Is(err, secrets.ErrCiphertextInvalid) {
@@ -270,7 +300,7 @@ func TestSecretService_WrongKey_FailsSafely(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewDevKeyProvider: %v", err)
 		}
-		otherSvc := NewSecretService(env.repo, secrets.NewEncryptionService(otherProvider), NewRBACService(env.rbac), nil)
+		otherSvc := NewSecretService(env.repo, secrets.NewEncryptionService(otherProvider), NewRBACService(env.rbac), env.policySvc, nil)
 
 		_, err = otherSvc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/db", ActorUserID: readerID})
 		if !errors.Is(err, secrets.ErrKeyUnavailable) {
@@ -506,6 +536,234 @@ func TestSecretService_AuditNeverContainsPlaintextOrKeys(t *testing.T) {
 		}
 		if strings.Contains(string(encoded), string(env.rawKey)) {
 			t.Errorf("audit entry %q metadata contains raw key material", e.Action)
+		}
+	}
+}
+
+// --- Sprint 4 Task 2: path-scoped policy authorization, layered on top
+// of (never replacing) the secrets:* RBAC checks exercised above.
+// testFullAccessRoleID's wildcard policy is what keeps every test above
+// this section passing unchanged (see that constant's own doc comment);
+// the tests below construct their own narrower policies to exercise the
+// new layer directly. ---
+
+func TestSecretService_PathPolicy_DeniesWithoutMatchingPolicy(t *testing.T) {
+	env := newTestSecretEnv(t)
+	createValidSecret(t, env, "app/db")
+
+	const actor = "user-path-no-policy"
+	env.rbac.Grant(actor, permSecretsRead)
+	// actor holds the global secrets:read permission but is not a member
+	// of any role a secret policy is assigned to — deny by default per the
+	// objective, even though the RBAC check alone would have allowed this.
+
+	_, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/db", ActorUserID: actor})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret() with secrets:read but no matching path policy, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+func TestSecretService_PathPolicy_GlobalPermissionRequiredEvenWithMatchingPolicy(t *testing.T) {
+	env := newTestSecretEnv(t)
+	createValidSecret(t, env, "app/db")
+
+	const actor = "user-policy-no-permission"
+	const role = "role-wildcard-no-rbac"
+	env.policies.GrantFullAccessToRole(role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+	// actor's role carries a "*" allow-everything path policy, but actor
+	// was never granted secrets:read itself — "If user lacks secrets:read,
+	// Result: DENY even if a path policy exists," per the objective.
+
+	_, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/db", ActorUserID: actor})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret() with a full-access path policy but no secrets:read permission, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+func TestSecretService_PathPolicy_AllowsAndDeniesByPath(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-only"
+	const role = "role-dev-only"
+	env.rbac.Grant(actor, permSecretsRead)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-only", Name: "dev-only"})
+	env.policies.SeedRule("policy-dev-only", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow, Actions: []entity.PolicyAction{entity.PolicyActionRead},
+	})
+	env.policies.AssignRole("policy-dev-only", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	createValidSecret(t, env, "dev/db")
+	createValidSecret(t, env, "prod/db")
+
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "dev/db", ActorUserID: actor}); err != nil {
+		t.Errorf("GetSecret(dev/db) = %v, want nil (matching dev/* policy)", err)
+	}
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "prod/db", ActorUserID: actor}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret(prod/db) = %v, want entity.ErrForbidden (no matching policy)", err)
+	}
+}
+
+func TestSecretService_PathPolicy_CreateRespectsPath(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-creator"
+	const role = "role-dev-creator"
+	env.rbac.Grant(actor, permSecretsCreate)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-create", Name: "dev-create"})
+	env.policies.SeedRule("policy-dev-create", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow, Actions: []entity.PolicyAction{entity.PolicyActionCreate},
+	})
+	env.policies.AssignRole("policy-dev-create", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	if _, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{OrganizationID: testOrgID, Path: "dev/test", Payload: validPayload(), ActorUserID: actor}); err != nil {
+		t.Errorf("CreateSecret(dev/test) = %v, want nil", err)
+	}
+	if _, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{OrganizationID: testOrgID, Path: "prod/test", Payload: validPayload(), ActorUserID: actor}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("CreateSecret(prod/test) = %v, want entity.ErrForbidden", err)
+	}
+}
+
+func TestSecretService_PathPolicy_UpdateAndDeleteRespectPath(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-writer"
+	const role = "role-dev-writer"
+	env.rbac.Grant(actor, permSecretsUpdate)
+	env.rbac.Grant(actor, permSecretsDelete)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-write", Name: "dev-write"})
+	env.policies.SeedRule("policy-dev-write", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow,
+		Actions: []entity.PolicyAction{entity.PolicyActionUpdate, entity.PolicyActionDelete},
+	})
+	env.policies.AssignRole("policy-dev-write", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	devMeta := createValidSecret(t, env, "dev/rotate")
+	prodMeta := createValidSecret(t, env, "prod/rotate")
+
+	if _, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rotate", ExpectedVersion: devMeta.CurrentVersion, Payload: validPayload(), ActorUserID: actor,
+	}); err != nil {
+		t.Errorf("UpdateSecret(dev/rotate) = %v, want nil", err)
+	}
+	if _, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "prod/rotate", ExpectedVersion: prodMeta.CurrentVersion, Payload: validPayload(), ActorUserID: actor,
+	}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("UpdateSecret(prod/rotate) = %v, want entity.ErrForbidden", err)
+	}
+
+	if err := env.svc.DeleteSecret(t.Context(), DeleteSecretInput{OrganizationID: testOrgID, Path: "prod/rotate", ActorUserID: actor}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("DeleteSecret(prod/rotate) = %v, want entity.ErrForbidden", err)
+	}
+	if err := env.svc.DeleteSecret(t.Context(), DeleteSecretInput{OrganizationID: testOrgID, Path: "dev/rotate", ActorUserID: actor}); err != nil {
+		t.Errorf("DeleteSecret(dev/rotate) = %v, want nil", err)
+	}
+}
+
+// --- AUDIT: denied secret access must leave a trail (identity, action,
+// canonical path, result), at both the global-permission layer and the
+// path-policy layer — before this, a rejected caller left no audit
+// record at all. ---
+
+func TestSecretService_DeniedAccess_AuditedAtPermissionLayer(t *testing.T) {
+	env := newTestSecretEnv(t)
+	_, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/db", ActorUserID: nobodyID, IPAddress: "203.0.113.99"})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Fatalf("GetSecret() error = %v, want entity.ErrForbidden", err)
+	}
+
+	found := false
+	for _, e := range env.audit.Entries {
+		if e.Action != "secret.access_denied" {
+			continue
+		}
+		found = true
+		if e.Result != entity.AuditResultDenied {
+			t.Errorf("audit entry Result = %q, want %q", e.Result, entity.AuditResultDenied)
+		}
+		if e.ActorID == nil || *e.ActorID != nobodyID {
+			t.Errorf("audit entry ActorID = %v, want %q", e.ActorID, nobodyID)
+		}
+		if e.ResourceID == nil || *e.ResourceID != "app/db" {
+			t.Errorf("audit entry ResourceID = %v, want the canonical path %q", e.ResourceID, "app/db")
+		}
+	}
+	if !found {
+		t.Error("no secret.access_denied audit entry was recorded for a permission-layer denial")
+	}
+}
+
+func TestSecretService_DeniedAccess_AuditedAtPathPolicyLayer(t *testing.T) {
+	env := newTestSecretEnv(t)
+	createValidSecret(t, env, "prod/db")
+
+	const actor = "user-audit-path-denied"
+	env.rbac.Grant(actor, permSecretsRead)
+
+	_, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "prod/db", ActorUserID: actor, IPAddress: "203.0.113.98"})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Fatalf("GetSecret() error = %v, want entity.ErrForbidden", err)
+	}
+
+	found := false
+	for _, e := range env.audit.Entries {
+		if e.Action == "secret.access_denied" && e.ActorID != nil && *e.ActorID == actor {
+			found = true
+			if e.Result != entity.AuditResultDenied {
+				t.Errorf("audit entry Result = %q, want %q", e.Result, entity.AuditResultDenied)
+			}
+		}
+	}
+	if !found {
+		t.Error("no secret.access_denied audit entry was recorded for a path-policy-layer denial (global permission held, no matching policy)")
+	}
+}
+
+// --- LIST AUTHORIZATION: the objective's own dev/database + dev/api +
+// prod/database + prod/payment example, reproduced exactly. ---
+
+func TestSecretService_PathPolicy_ListFiltersUnauthorizedPaths(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-lister"
+	const role = "role-dev-lister"
+	env.rbac.Grant(actor, permSecretsList)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-list", Name: "dev-list"})
+	env.policies.SeedRule("policy-dev-list", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow, Actions: []entity.PolicyAction{entity.PolicyActionList},
+	})
+	env.policies.AssignRole("policy-dev-list", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	createValidSecret(t, env, "dev/database")
+	createValidSecret(t, env, "dev/api")
+	createValidSecret(t, env, "prod/database")
+	createValidSecret(t, env, "prod/payment")
+
+	out, err := env.svc.ListSecrets(t.Context(), ListSecretsInput{OrganizationID: testOrgID, ActorUserID: actor})
+	if err != nil {
+		t.Fatalf("ListSecrets() error = %v", err)
+	}
+	got := map[string]bool{}
+	for _, m := range out {
+		got[m.Path] = true
+	}
+	want := map[string]bool{"dev/database": true, "dev/api": true}
+	if len(got) != len(want) {
+		t.Fatalf("ListSecrets() paths = %v, want exactly %v", got, want)
+	}
+	for p := range got {
+		if !want[p] {
+			t.Errorf("ListSecrets() unexpectedly included unauthorized path %q — must never reveal metadata for a path the caller has no policy for", p)
 		}
 	}
 }

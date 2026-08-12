@@ -151,6 +151,22 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Invalid secret path.", nil)
 	case errors.Is(err, service.ErrEmptyPayload):
 		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Secret payload must not be empty.", nil)
+	case errors.Is(err, service.ErrEmptyPolicyRules):
+		// Sprint 4 Task 2: reachable if a caller somehow reaches
+		// SecretPolicyService with zero rules despite
+		// dto.SecretPolicyCreateRequest/SecretPolicyUpdateRequest already
+		// rejecting that shape at the DTO boundary (see those types' own
+		// Validate methods) — defense-in-depth, the same "the DTO layer
+		// normally catches this, but the service's own check must still
+		// map to 422, never 500, if it's ever the one that fires" precedent
+		// util.ErrInvalidSecretPath's own case above already establishes.
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "A secret policy must have at least one rule.", nil)
+	case errors.Is(err, util.ErrInvalidPolicyPattern):
+		// Sprint 4 Task 2: a policy rule's path_pattern failed
+		// util.ValidatePolicyPathPattern — normally caught first by
+		// dto.PolicyRuleRequest.validate, reached here only as
+		// defense-in-depth for the same reason the case above is.
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Invalid secret policy path pattern.", nil)
 	default:
 		// Anything else is unmapped — middleware.Recover would also catch
 		// a panic, but a plain returned error should still become a clean

@@ -224,14 +224,17 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	// unaffected — nil is a supported RouterDeps.SecretService value, and
 	// /v1/secrets simply isn't registered when it's nil.
 	var secretSvc *service.SecretService
+	var secretPolicySvc *service.SecretPolicyService
 	if cfg.Secrets.DevMasterKey != "" {
 		secretRepo := postgres.NewSecretRepository(db)
+		secretPolicyRepo := postgres.NewSecretPolicyRepository(db)
+		secretPolicySvc = service.NewSecretPolicyService(secretPolicyRepo, userRepo, rbacSvc, loginAuditTx)
 		keyProvider, err := secrets.NewDevKeyProvider(cfg.Secrets.DevMasterKeyID, cfg.Secrets.DevMasterKey)
 		if err != nil {
 			t.Fatalf("newE2EEnv: construct secrets key provider: %v", err)
 		}
 		encryptionSvc := secrets.NewEncryptionService(keyProvider)
-		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, loginAuditTx)
+		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, secretPolicySvc, loginAuditTx)
 	}
 
 	router := httphandler.NewRouter(httphandler.RouterDeps{
@@ -240,6 +243,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		RoleService:         roleSvc,
 		RBACService:         rbacSvc,
 		SecretService:       secretSvc,
+		SecretPolicyService: secretPolicySvc,
 		RefreshTokenService: refreshTokenSvc,
 		LogoutService:       logoutSvc,
 		BootstrapService:    bootstrapSvc,
