@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -168,5 +169,264 @@ func TestRedisAuthAbuseProtection_ConcurrentFailuresCannotBypassThreshold(t *tes
 	}
 	if count != concurrency {
 		t.Errorf("counter = %d, want exactly %d (no lost updates from concurrent INCRs)", count, concurrency)
+	}
+}
+
+// --- Sprint 4 Task 4: general-purpose APIRateLimiter, real-Redis half ---
+//
+// internal/ratelimit's own api_limiter_test.go and fake_api_limiter_test.go
+// prove the algorithm and the fake double; these tests prove the same
+// properties against real Redis specifically where a fake cannot: TTL
+// actually reaching Redis, atomicity coming from the Lua script's EVAL
+// semantics rather than a Go mutex, and — the one property no single
+// in-process client can demonstrate at all — that the limit is shared
+// correctly across multiple independent client connections, standing in
+// for multiple application instances behind a load balancer (the
+// objective's own "the limit must not reset merely because traffic
+// reaches a different application instance" requirement).
+
+func testAPICategoryConfig(limit int64, window time.Duration, failOpen bool) map[string]ratelimit.CategoryConfig {
+	return map[string]ratelimit.CategoryConfig{
+		"secrets-read": {
+			User:     &ratelimit.WindowPolicy{Window: window, Limit: limit},
+			FailOpen: failOpen,
+		},
+	}
+}
+
+func TestRedisAPILimiter_TTLIsApplied(t *testing.T) {
+	client := connectForRateLimitTest(t)
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	limiter := ratelimit.NewRedisAPIRateLimiter(client, ratelimit.APIRateLimiterConfig{
+		Categories: testAPICategoryConfig(100, 5*time.Minute, false),
+	})
+
+	if _, err := limiter.Allow(ctx, "secrets-read", ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: "user-1"}); err != nil {
+		t.Fatalf("Allow(): %v", err)
+	}
+
+	keys, err := client.Keys(ctx, "ratelimit:api:secrets-read:user:*").Result()
+	if err != nil {
+		t.Fatalf("KEYS: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("counter keys = %d, want exactly 1", len(keys))
+	}
+	ttl, err := client.TTL(ctx, keys[0]).Result()
+	if err != nil {
+		t.Fatalf("TTL: %v", err)
+	}
+	if ttl <= 0 || ttl > 5*time.Minute {
+		t.Errorf("TTL = %v, want a positive value at most 5m (the configured window) — every rate-limit key must expire on its own", ttl)
+	}
+}
+
+// TestRedisAPILimiter_KeyDoesNotContainRawIdentifier is the real-Redis half
+// of the "never place sensitive plaintext identifiers in keys" requirement
+// — internal/ratelimit's own unit test proves the key() function's output
+// never contains the raw ID, this proves the exact key Redis actually
+// stores under carries the same property.
+func TestRedisAPILimiter_KeyDoesNotContainRawIdentifier(t *testing.T) {
+	client := connectForRateLimitTest(t)
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	limiter := ratelimit.NewRedisAPIRateLimiter(client, ratelimit.APIRateLimiterConfig{
+		Categories: testAPICategoryConfig(100, time.Minute, false),
+	})
+	const rawUserID = "user-victim-98765"
+
+	if _, err := limiter.Allow(ctx, "secrets-read", ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: rawUserID}); err != nil {
+		t.Fatalf("Allow(): %v", err)
+	}
+
+	keys, err := client.Keys(ctx, "ratelimit:api:*").Result()
+	if err != nil {
+		t.Fatalf("KEYS: %v", err)
+	}
+	for _, k := range keys {
+		if strings.Contains(k, rawUserID) {
+			t.Errorf("Redis key %q contains the raw identifier", k)
+		}
+	}
+}
+
+// TestRedisAPILimiter_WindowExpiryResetsTheCounter proves a real Redis TTL
+// expiry — not the fake's simulated wall-clock comparison — actually lets
+// a throttled identity through again once its window rolls over.
+func TestRedisAPILimiter_WindowExpiryResetsTheCounter(t *testing.T) {
+	client := connectForRateLimitTest(t)
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	limiter := ratelimit.NewRedisAPIRateLimiter(client, ratelimit.APIRateLimiterConfig{
+		Categories: testAPICategoryConfig(1, 2*time.Second, false),
+	})
+	identity := ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: "user-1"}
+
+	decision, err := limiter.Allow(ctx, "secrets-read", identity)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("Allow() request 1 = %+v, %v; want allowed", decision, err)
+	}
+	decision, err = limiter.Allow(ctx, "secrets-read", identity)
+	if err != nil {
+		t.Fatalf("Allow(): %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("Allow() request 2 within the window = allowed, want blocked (limit is 1)")
+	}
+
+	time.Sleep(3 * time.Second)
+
+	decision, err = limiter.Allow(ctx, "secrets-read", identity)
+	if err != nil {
+		t.Fatalf("Allow(): %v", err)
+	}
+	if !decision.Allowed {
+		t.Error("Allow() after the window expired = blocked, want allowed")
+	}
+}
+
+// TestRedisAPILimiter_ConcurrentRequestsCannotBypassThreshold is the
+// real-Redis half of "avoid race conditions in distributed counting" —
+// proves the Lua script's atomicity, not a Go mutex, is what keeps
+// concurrent Allow calls for the same identity from letting more than
+// Limit requests through.
+func TestRedisAPILimiter_ConcurrentRequestsCannotBypassThreshold(t *testing.T) {
+	client := connectForRateLimitTest(t)
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	const limit = 50
+	limiter := ratelimit.NewRedisAPIRateLimiter(client, ratelimit.APIRateLimiterConfig{
+		Categories: testAPICategoryConfig(limit, time.Minute, false),
+	})
+	identity := ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: "user-1"}
+
+	const concurrency = 200
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allowedCount := 0
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			decision, err := limiter.Allow(ctx, "secrets-read", identity)
+			if err != nil {
+				t.Errorf("Allow(): %v", err)
+				return
+			}
+			if decision.Allowed {
+				mu.Lock()
+				allowedCount++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if allowedCount != limit {
+		t.Errorf("allowedCount = %d, want exactly %d — a race would let more than the configured limit through", allowedCount, limit)
+	}
+
+	counterKeys, err := client.Keys(ctx, "ratelimit:api:secrets-read:user:*").Result()
+	if err != nil {
+		t.Fatalf("KEYS: %v", err)
+	}
+	if len(counterKeys) != 1 {
+		t.Fatalf("counter keys = %d, want exactly 1", len(counterKeys))
+	}
+	count, err := client.Get(ctx, counterKeys[0]).Int()
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if count != concurrency {
+		t.Errorf("counter = %d, want exactly %d (no lost updates from concurrent INCRs)", count, concurrency)
+	}
+}
+
+// TestRedisAPILimiter_SharedAcrossMultipleClientInstances is the one
+// property no single-process, single-client test — fake or real — can
+// demonstrate: two entirely independent RedisAPIRateLimiter instances,
+// each with its own *redis.Client connection (standing in for two
+// separate application server instances behind a load balancer), enforce
+// exactly one shared limit because the counter lives in Redis, not in
+// either process's memory. This is the objective's own "the limit must
+// not reset merely because traffic reaches a different application
+// instance" requirement, proven directly rather than inferred from the
+// key format alone.
+func TestRedisAPILimiter_SharedAcrossMultipleClientInstances(t *testing.T) {
+	client := connectForRateLimitTest(t)
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	addr := os.Getenv("REDIS_ADDR")
+	cfg := ratelimit.APIRateLimiterConfig{Categories: testAPICategoryConfig(10, time.Minute, false)}
+
+	instanceA := ratelimit.NewRedisAPIRateLimiter(client, cfg)
+	clientB := goredis.NewClient(&goredis.Options{Addr: addr, DialTimeout: 5 * time.Second})
+	t.Cleanup(func() { _ = clientB.Close() })
+	instanceB := ratelimit.NewRedisAPIRateLimiter(clientB, cfg)
+
+	identity := ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: "user-1"}
+
+	allowed := 0
+	for i := 0; i < 10; i++ {
+		limiter := instanceA
+		if i%2 == 1 {
+			limiter = instanceB
+		}
+		decision, err := limiter.Allow(ctx, "secrets-read", identity)
+		if err != nil {
+			t.Fatalf("Allow() (alternating instance %d): %v", i, err)
+		}
+		if decision.Allowed {
+			allowed++
+		} else {
+			t.Fatalf("request %d (instance %s) was blocked before the shared limit of 10 was reached", i+1, map[bool]string{true: "B", false: "A"}[i%2 == 1])
+		}
+	}
+
+	// The 11th request, alternating instance once more, must be blocked —
+	// proving the two "application instances" share one counter, not one
+	// each.
+	decision, err := instanceA.Allow(ctx, "secrets-read", identity)
+	if err != nil {
+		t.Fatalf("Allow(): %v", err)
+	}
+	if decision.Allowed {
+		t.Error("the 11th request across two independent client instances = allowed, want blocked (they must share one Redis-backed counter)")
+	}
+}
+
+// TestRedisAPILimiter_FailOpenWhenRedisUnreachable proves the real
+// implementation's Redis-outage posture matches the documented per-category
+// FailOpen contract against an actual (albeit refused) connection, not
+// just the unit tests' shared unreachable-client helper's assumptions.
+func TestRedisAPILimiter_FailOpenWhenRedisUnreachable(t *testing.T) {
+	// Reuses the same "unreachable Redis" shape as
+	// TestRedisAuthAbuseProtection's own unit tests: a real client pointed
+	// at a port nothing listens on, so calls fail at the network layer.
+	client := goredis.NewClient(&goredis.Options{
+		Addr:            "127.0.0.1:1",
+		DialTimeout:     200 * time.Millisecond,
+		ReadTimeout:     200 * time.Millisecond,
+		MaxRetries:      1,
+		MinRetryBackoff: 10 * time.Millisecond,
+		MaxRetryBackoff: 20 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+
+	limiter := ratelimit.NewRedisAPIRateLimiter(client, ratelimit.APIRateLimiterConfig{
+		Categories: testAPICategoryConfig(5, time.Minute, true),
+	})
+	decision, err := limiter.Allow(context.Background(), "secrets-read", ratelimit.RequestIdentity{Type: ratelimit.IdentityUser, ID: "user-1"})
+	if err != nil {
+		t.Fatalf("Allow() error = %v, want nil", err)
+	}
+	if !decision.Allowed {
+		t.Error("Allow() with Redis unreachable and FailOpen=true = blocked, want allowed")
 	}
 }

@@ -159,7 +159,12 @@ func TestRefreshHandler_RateLimited(t *testing.T) {
 	}
 
 	req := refreshHTTPRequest(t, `{"refresh_token":"anything"}`)
-	req.Header.Set("X-Forwarded-For", "203.0.113.1")
+	// Sprint 4 Task 4: X-Forwarded-For is no longer trusted unconditionally
+	// (see util.ResolveClientIP's own doc comment) — this test has no
+	// trusted proxy configured, the correct default, so it sets the
+	// simulated client's address directly via RemoteAddr instead of
+	// relying on a header a real, unproxied caller could set to anything.
+	req.RemoteAddr = "203.0.113.1:12345"
 	rec := httptest.NewRecorder()
 	h.refresh(rec, req)
 

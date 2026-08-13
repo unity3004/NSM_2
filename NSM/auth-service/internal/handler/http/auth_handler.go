@@ -1,11 +1,11 @@
 package http
 
 import (
-	"net"
 	"net/http"
 
 	"github.com/acme/auth-service/internal/dto"
 	"github.com/acme/auth-service/internal/service"
+	"github.com/acme/auth-service/internal/util"
 )
 
 type authHandler struct {
@@ -24,19 +24,14 @@ func organizationIDFromRequest(r *http.Request) string {
 
 // clientIP returns a bare IP address — never host:port — since every
 // caller ultimately stores this in an INET column (sessions, login_history,
-// audit_logs), which rejects a port suffix. r.RemoteAddr is always
-// "ip:port" in net/http; net.SplitHostPort strips it. X-Forwarded-For, when
-// present, is assumed to already be a bare IP (a reverse proxy's own
-// header, not something net/http formats for us) and is returned as-is.
+// audit_logs), which rejects a port suffix. Delegates to
+// util.ResolveClientIP (Sprint 4 Task 4) for the actual resolution — see
+// that function's own doc comment for why X-Forwarded-For/X-Real-IP are
+// only ever trusted when the request's direct peer is itself a
+// configured trusted proxy, never unconditionally. This function's own
+// name and signature are unchanged for every existing caller.
 func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return fwd
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return util.ResolveClientIP(r)
 }
 
 func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {
