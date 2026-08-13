@@ -82,6 +82,13 @@ services:
       AUTH_DATABASE_URL: "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable"
       AUTH_JWT_SIGNING_KEY: "local-development-signing-key-not-for-prod-use"
       AUTH_REDIS_ADDR: "redis:6379"
+      # Vite's own dev server default port — see
+      # ../configs/.env.example's identical (commented-out) line for the
+      # non-Docker `go run ./cmd/server` equivalent. AllowedOrigins has no
+      # default of its own (config.go's own default is []), so a frontend
+      # dev server calling this API gets a real CORS error until this is
+      # set — this is that setting for the containerized stack.
+      AUTH_SERVER_ALLOWED_ORIGINS: "http://localhost:5173"
       # key_id is just a label (see AccessTokenConfig.KeyID's own doc
       # comment) — not secret. The actual private key material comes from
       # the keygen service above, never from a literal here.
