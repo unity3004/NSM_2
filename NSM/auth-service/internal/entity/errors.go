@@ -39,4 +39,12 @@ var (
 	// react (re-read the current version and retry, or surface a 409 to
 	// its own caller — never silently overwrite).
 	ErrVersionConflict = errors.New("secret was updated by someone else; expected version is stale")
+	// ErrInvalidServiceAccountCredential covers every way a machine-auth
+	// credential can fail to verify — unknown, wrong secret, wrong owning
+	// service account, revoked, or expired — collapsed into one error for
+	// the same anti-enumeration reason ErrInvalidCredentials collapses
+	// every human-login failure mode: a caller must never be able to tell
+	// "no such credential" apart from "credential exists but is expired"
+	// through the response alone.
+	ErrInvalidServiceAccountCredential = errors.New("invalid service account credentials")
 )

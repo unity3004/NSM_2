@@ -32,7 +32,7 @@ func newTestSecretPolicyHandler(t *testing.T) *secretPolicyHandler {
 	audit := mocks.NewFakeAuditLogRepository()
 	auditTx := mocks.FakeAuditTx(audit)
 
-	svc := service.NewSecretPolicyService(repo, users, rbacSvc, auditTx)
+	svc := service.NewSecretPolicyService(repo, users, mocks.NewFakeServiceAccountRepository(), rbacSvc, auditTx)
 	return &secretPolicyHandler{svc: svc}
 }
 

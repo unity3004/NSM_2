@@ -51,17 +51,23 @@ var ErrEmptyPolicyRules = errors.New("service: secret policy must have at least 
 // own doc comment for why that logic lives there, deterministic and
 // dependency-free, rather than here.
 type SecretPolicyService struct {
-	repo    repository.SecretPolicyRepository
-	users   repository.UserRepository
-	rbac    *RBACService
-	auditTx AuditTxFunc
+	repo  repository.SecretPolicyRepository
+	users repository.UserRepository
+	// serviceAccounts (Sprint 5 Task 1) is roleIDsForActor's
+	// machine-identity source of role grants — the same role
+	// repository.UserRepository.ListRoles plays for a human actor. Never
+	// nil in practice: cmd/server/main.go always constructs one alongside
+	// users (see that file's own wiring).
+	serviceAccounts repository.ServiceAccountRepository
+	rbac            *RBACService
+	auditTx         AuditTxFunc
 }
 
 // NewSecretPolicyService constructs a SecretPolicyService. auditTx may be
 // nil, the same allowance every other AuditTx dependency in this codebase
 // makes.
-func NewSecretPolicyService(repo repository.SecretPolicyRepository, users repository.UserRepository, rbac *RBACService, auditTx AuditTxFunc) *SecretPolicyService {
-	return &SecretPolicyService{repo: repo, users: users, rbac: rbac, auditTx: auditTx}
+func NewSecretPolicyService(repo repository.SecretPolicyRepository, users repository.UserRepository, serviceAccounts repository.ServiceAccountRepository, rbac *RBACService, auditTx AuditTxFunc) *SecretPolicyService {
+	return &SecretPolicyService{repo: repo, users: users, serviceAccounts: serviceAccounts, rbac: rbac, auditTx: auditTx}
 }
 
 // PolicyRuleInput is the caller-supplied shape of one rule — Effect
@@ -319,8 +325,8 @@ func (s *SecretPolicyService) ListAssignedRoleIDs(ctx context.Context, actorUser
 // every applicable rule in one query, and internal/policy.Evaluate is a
 // pure, in-memory decision over the result — see that function's own doc
 // comment for the deny > allow > default-deny precedence.
-func (s *SecretPolicyService) Authorize(ctx context.Context, actorUserID, organizationID, canonicalPath string, action policy.Action) (bool, error) {
-	roleIDs, err := s.roleIDsForUser(ctx, actorUserID)
+func (s *SecretPolicyService) Authorize(ctx context.Context, actorID string, actorIsServiceAccount bool, organizationID, canonicalPath string, action policy.Action) (bool, error) {
+	roleIDs, err := s.roleIDsForActor(ctx, actorID, actorIsServiceAccount)
 	if err != nil {
 		return false, err
 	}
@@ -340,8 +346,8 @@ func (s *SecretPolicyService) Authorize(ctx context.Context, actorUserID, organi
 // "one query, then in-memory evaluation" shape Authorize uses, extended
 // to many paths instead of one, so this scales with the size of the
 // caller's rule set, not the size of the secret list.
-func (s *SecretPolicyService) FilterAllowedPaths(ctx context.Context, actorUserID, organizationID string, paths []string, action policy.Action) ([]string, error) {
-	roleIDs, err := s.roleIDsForUser(ctx, actorUserID)
+func (s *SecretPolicyService) FilterAllowedPaths(ctx context.Context, actorID string, actorIsServiceAccount bool, organizationID string, paths []string, action policy.Action) ([]string, error) {
+	roleIDs, err := s.roleIDsForActor(ctx, actorID, actorIsServiceAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -360,14 +366,32 @@ func (s *SecretPolicyService) FilterAllowedPaths(ctx context.Context, actorUserI
 	return allowed, nil
 }
 
-// roleIDsForUser resolves actorUserID's current, non-expired role grants
-// — repository.UserRepository.ListRoles already filters expired grants at
-// the SQL level (see that method's own implementation), the identical
-// filtering RBACRepository.UserHasPermission applies for the base
-// permission check, so a role that has expired stops contributing policy
-// rules at exactly the same moment it stops contributing permissions.
-func (s *SecretPolicyService) roleIDsForUser(ctx context.Context, userID string) ([]string, error) {
-	grants, err := s.users.ListRoles(ctx, userID)
+// roleIDsForActor resolves actorID's current role grants — a human
+// actor's via repository.UserRepository.ListRoles (which also filters
+// expired grants at the SQL level, the identical filtering
+// RBACRepository.UserHasPermission applies for the base permission check,
+// so a role that has expired stops contributing policy rules at exactly
+// the same moment it stops contributing permissions), or a service
+// account's via repository.ServiceAccountRepository.ListRoles (Sprint 5
+// Task 1 — service_account_roles grants have no expiry column at all, see
+// that repository interface's own doc comment on why). Which one this
+// calls is never guessed from actorID's shape — both are opaque UUIDs —
+// only from actorIsServiceAccount, the same explicit signal every other
+// identity-type dispatch in this codebase (RequirePermission,
+// SecretService.authorize) already uses.
+func (s *SecretPolicyService) roleIDsForActor(ctx context.Context, actorID string, actorIsServiceAccount bool) ([]string, error) {
+	if actorIsServiceAccount {
+		grants, err := s.serviceAccounts.ListRoles(ctx, actorID)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(grants))
+		for i, g := range grants {
+			ids[i] = g.RoleID
+		}
+		return ids, nil
+	}
+	grants, err := s.users.ListRoles(ctx, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -428,6 +452,7 @@ func (s *SecretPolicyService) recordPolicyAudit(ctx context.Context, action, act
 			ResourceID:   strPtr(policyID),
 			Result:       entity.AuditResultSuccess,
 			IPAddress:    strPtr(ipAddress),
+			RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 			Metadata:     metadata,
 		})
 	})

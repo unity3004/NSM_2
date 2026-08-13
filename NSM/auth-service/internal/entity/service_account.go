@@ -16,14 +16,20 @@ const (
 // separately keeps those columns from being nullable-for-half-the-table on
 // User.
 type ServiceAccount struct {
-	ID             string
-	OrganizationID string
-	Name           string
-	Description    *string
-	Status         ServiceAccountStatus
-	CreatedBy      *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                  string
+	OrganizationID      string
+	Name                string
+	Description         *string
+	Status              ServiceAccountStatus
+	CreatedBy           *string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	// LastAuthenticatedAt is nil until the first successful machine
+	// authentication (ServiceAccountService.Authenticate) and updated on
+	// every one thereafter — never touched by admin operations (create,
+	// role grants, credential issuance) that don't themselves constitute
+	// the service account actually authenticating.
+	LastAuthenticatedAt *time.Time
 }
 
 // ServiceAccountRole is a role grant to a service account (service_account_roles).

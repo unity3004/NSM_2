@@ -27,14 +27,15 @@ const (
 // actually persisted/audited without going through the service's own
 // (deliberately narrow) return types.
 type testSecretEnv struct {
-	svc       *SecretService
-	repo      *mocks.FakeSecretRepository
-	rbac      *mocks.FakeRBACRepository
-	users     *mocks.FakeUserRepository
-	policies  *mocks.FakeSecretPolicyRepository
-	policySvc *SecretPolicyService
-	audit     *mocks.FakeAuditLogRepository
-	enc       *secrets.EncryptionService
+	svc             *SecretService
+	repo            *mocks.FakeSecretRepository
+	rbac            *mocks.FakeRBACRepository
+	users           *mocks.FakeUserRepository
+	serviceAccounts *mocks.FakeServiceAccountRepository
+	policies        *mocks.FakeSecretPolicyRepository
+	policySvc       *SecretPolicyService
+	audit           *mocks.FakeAuditLogRepository
+	enc             *secrets.EncryptionService
 	// rawKey is the decoded 32-byte AES key backing enc's DevKeyProvider —
 	// captured here (never exposed by secrets.KeyProvider itself, by
 	// design) purely so TestSecretService_AuditNeverContainsPlaintextOrKeys
@@ -80,7 +81,8 @@ func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	rbacSvc := NewRBACService(rbacRepo)
 	users := mocks.NewFakeUserRepository()
 	policyRepo := mocks.NewFakeSecretPolicyRepository()
-	policySvc := NewSecretPolicyService(policyRepo, users, rbacSvc, nil)
+	serviceAccounts := mocks.NewFakeServiceAccountRepository()
+	policySvc := NewSecretPolicyService(policyRepo, users, serviceAccounts, rbacSvc, nil)
 	audit := mocks.NewFakeAuditLogRepository()
 	auditTx := mocks.FakeAuditTx(audit)
 
@@ -107,7 +109,10 @@ func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	}
 
 	svc := NewSecretService(repo, enc, rbacSvc, policySvc, auditTx)
-	return &testSecretEnv{svc: svc, repo: repo, rbac: rbacRepo, users: users, policies: policyRepo, policySvc: policySvc, audit: audit, enc: enc, rawKey: rawKey}
+	return &testSecretEnv{
+		svc: svc, repo: repo, rbac: rbacRepo, users: users, serviceAccounts: serviceAccounts,
+		policies: policyRepo, policySvc: policySvc, audit: audit, enc: enc, rawKey: rawKey,
+	}
 }
 
 // newTestKeyBase64 is the standalone form TestSecretService_WrongKey_FailsSafely
@@ -765,5 +770,109 @@ func TestSecretService_PathPolicy_ListFiltersUnauthorizedPaths(t *testing.T) {
 		if !want[p] {
 			t.Errorf("ListSecrets() unexpectedly included unauthorized path %q — must never reveal metadata for a path the caller has no policy for", p)
 		}
+	}
+}
+
+// --- Sprint 5 Task 1: the objective's own worked example, exercised
+// directly — payment-service (a service account) -> payment-reader (a
+// role) -> a policy granting prod/payment/* read -> ALLOW, and DENY
+// outside that path. These are the service-account-actor mirror of
+// TestSecretService_PathPolicy_AllowsAndDeniesByPath above, proving the
+// same authorization chain works when the actor row lives in
+// service_account_roles instead of user_roles. ---
+
+func TestSecretService_ServiceAccountActor_AllowedWithinGrantedPolicyPath(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const serviceAccountID = "sa-payment-service"
+	const role = "role-payment-reader"
+	env.rbac.Grant(serviceAccountID, permSecretsRead)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-payment-read", Name: "payment-read"})
+	env.policies.SeedRule("policy-payment-read", &entity.SecretPolicyRule{
+		PathPattern: "prod/payment/*", Effect: entity.PolicyEffectAllow, Actions: []entity.PolicyAction{entity.PolicyActionRead},
+	})
+	env.policies.AssignRole("policy-payment-read", role)
+	if err := env.serviceAccounts.GrantRole(t.Context(), &entity.ServiceAccountRole{ServiceAccountID: serviceAccountID, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	createValidSecret(t, env, "prod/payment/database")
+	createValidSecret(t, env, "prod/hr/database")
+
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: "prod/payment/database", ActorUserID: serviceAccountID, ActorIsServiceAccount: true,
+	}); err != nil {
+		t.Errorf("GetSecret(prod/payment/database) by payment-service = %v, want nil (ALLOW per the objective's own worked example)", err)
+	}
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: "prod/hr/database", ActorUserID: serviceAccountID, ActorIsServiceAccount: true,
+	}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret(prod/hr/database) by payment-service = %v, want entity.ErrForbidden (DENY — outside its granted path)", err)
+	}
+}
+
+// TestSecretService_ServiceAccountActor_NoPermissionDeniedEvenWithPolicy
+// proves a service account's own global secrets:read permission (not just
+// a path policy) is still checked first — the identical "permission, then
+// policy, both required" ordering
+// TestSecretService_PathPolicy_DeniesFullPathAccessWithoutPermission
+// already proves for a human actor, here proven for a machine one so
+// there is no way for a service account specifically to bypass the
+// global-permission gate that a user actor cannot.
+func TestSecretService_ServiceAccountActor_NoPermissionDeniedEvenWithPolicy(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const serviceAccountID = "sa-no-permission"
+	const role = "role-full-policy-no-perm"
+	env.policies.GrantFullAccessToRole(role)
+	if err := env.serviceAccounts.GrantRole(t.Context(), &entity.ServiceAccountRole{ServiceAccountID: serviceAccountID, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+	createValidSecret(t, env, "app/db")
+
+	_, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: "app/db", ActorUserID: serviceAccountID, ActorIsServiceAccount: true,
+	})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret() by a service account with a full-access policy but no secrets:read permission, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// TestSecretService_ServiceAccountActor_UserRoleGrantDoesNotLeakToServiceAccount
+// proves role/policy resolution is genuinely isolated by identity type:
+// granting a role to a *user* ID (user_roles) must never make a service
+// account of the same ID string (a contrived but worth-proving collision)
+// inherit that role's path-policy grants via service_account_roles — the
+// dispatch in roleIDsForActor must key off actorIsServiceAccount, never
+// merely off whether some row with this ID happens to exist in either
+// table. (The two identities share a global secrets:read grant here only
+// because FakeRBACRepository's own doc comment already explains it makes
+// no user-vs-service-account distinction at that layer; the real
+// Postgres-backed RBACRepository joins user_roles/service_account_roles
+// separately even for that check — this test isolates the layer the fake
+// *can* faithfully distinguish, role/policy resolution, which is exactly
+// where Sprint 5 Task 1's actual bug risk was.)
+func TestSecretService_ServiceAccountActor_UserRoleGrantDoesNotLeakToServiceAccount(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const sharedID = "id-shared-across-tables"
+	env.rbac.Grant(sharedID, permSecretsRead)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: sharedID, RoleID: testFullAccessRoleID}); err != nil {
+		t.Fatalf("GrantRole(user): %v", err)
+	}
+	createValidSecret(t, env, "app/shared-id-db")
+
+	// As a user, sharedID is fully authorized (permission + full-access policy).
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: "app/shared-id-db", ActorUserID: sharedID, ActorIsServiceAccount: false,
+	}); err != nil {
+		t.Fatalf("GetSecret() as user sharedID = %v, want nil", err)
+	}
+	// The identical ID, presented as a service account, holds no
+	// service_account_roles grant at all and must be denied — RBACRepository.
+	// ServiceAccountHasPermission's own doc comment: the join is unrelated to
+	// UserHasPermission's, so a permission that exists for one identity type
+	// under this ID must never be visible to the other.
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: "app/shared-id-db", ActorUserID: sharedID, ActorIsServiceAccount: true,
+	}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetSecret() as service account sharedID = %v, want entity.ErrForbidden (must not inherit the user grant)", err)
 	}
 }

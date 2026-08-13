@@ -934,6 +934,32 @@ func (f *FakeRBACRepository) UserPermissions(_ context.Context, userID string) (
 	return out, nil
 }
 
+// ServiceAccountHasPermission/ServiceAccountPermissions (Sprint 5 Task 1)
+// share the same userID/serviceAccountID -> "resource:action" map
+// UserHasPermission/UserPermissions already use — this fake makes no
+// user_roles-vs-service_account_roles distinction at all (there is no
+// second table here to separate), the same "the fake doesn't need the
+// real schema's own separation to still exercise real service logic"
+// property every other fake in this file already has. Grant (not a
+// separately named GrantServiceAccount) is what a test calls either way;
+// the ID's own meaning is entirely up to the calling test.
+func (f *FakeRBACRepository) ServiceAccountHasPermission(_ context.Context, serviceAccountID, resource, action string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.grant[serviceAccountID][resource+":"+action], nil
+}
+
+func (f *FakeRBACRepository) ServiceAccountPermissions(_ context.Context, serviceAccountID string) ([]*entity.Permission, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.Permission
+	for perm := range f.grant[serviceAccountID] {
+		resource, action, _ := strings.Cut(perm, ":")
+		out = append(out, &entity.Permission{Resource: resource, Action: action})
+	}
+	return out, nil
+}
+
 func (f *FakeRBACRepository) CountUsersWithRole(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
@@ -1161,4 +1187,264 @@ func (f *FakeSecretPolicyRepository) ListRulesForRoles(_ context.Context, organi
 		out = append(out, f.rules[policyID]...)
 	}
 	return out, nil
+}
+
+// FakeServiceAccountRepository implements repository.ServiceAccountRepository
+// over an in-memory map, keyed by ID — the machine-identity mirror of
+// FakeUserRepository above, same shape and same conventions (Seed for
+// pre-existing rows, Create assigns an ID, GrantRole/RevokeRole/ListRoles
+// mirror the user variant exactly since service_account_roles has no
+// expires_at column to simulate).
+type FakeServiceAccountRepository struct {
+	mu    sync.Mutex
+	byID  map[string]*entity.ServiceAccount
+	roles map[string][]*entity.ServiceAccountRole
+}
+
+func NewFakeServiceAccountRepository() *FakeServiceAccountRepository {
+	return &FakeServiceAccountRepository{byID: map[string]*entity.ServiceAccount{}, roles: map[string][]*entity.ServiceAccountRole{}}
+}
+
+// Seed inserts a service account directly, bypassing Create's ID
+// assignment — the natural way a test arranges "given a service account
+// that already exists."
+func (f *FakeServiceAccountRepository) Seed(sa *entity.ServiceAccount) *entity.ServiceAccount {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if sa.ID == "" {
+		sa.ID = util.NewUUID()
+	}
+	if sa.Status == "" {
+		sa.Status = entity.ServiceAccountStatusActive
+	}
+	f.byID[sa.ID] = sa
+	return sa
+}
+
+// Create mirrors uq_service_accounts_org_name (migrations/000011) so a
+// unit test exercising duplicate-name behavior gets the same
+// entity.ErrAlreadyExists a real Postgres unique-violation would produce,
+// without needing a database.
+func (f *FakeServiceAccountRepository) Create(_ context.Context, sa *entity.ServiceAccount) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.byID {
+		if existing.OrganizationID == sa.OrganizationID && existing.Name == sa.Name {
+			return entity.ErrAlreadyExists
+		}
+	}
+	sa.ID = util.NewUUID()
+	sa.CreatedAt, sa.UpdatedAt = time.Now(), time.Now()
+	f.byID[sa.ID] = sa
+	return nil
+}
+
+func (f *FakeServiceAccountRepository) GetByID(_ context.Context, id string) (*entity.ServiceAccount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sa, ok := f.byID[id]
+	if !ok {
+		return nil, entity.ErrNotFound
+	}
+	cp := *sa
+	return &cp, nil
+}
+
+func (f *FakeServiceAccountRepository) List(_ context.Context, organizationID string, _ *string, _ int) ([]*entity.ServiceAccount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.ServiceAccount
+	for _, sa := range f.byID {
+		if sa.OrganizationID == organizationID {
+			cp := *sa
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (f *FakeServiceAccountRepository) Update(_ context.Context, sa *entity.ServiceAccount) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.byID[sa.ID]; !ok {
+		return entity.ErrNotFound
+	}
+	sa.UpdatedAt = time.Now()
+	f.byID[sa.ID] = sa
+	return nil
+}
+
+func (f *FakeServiceAccountRepository) Delete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.byID[id]; !ok {
+		return entity.ErrNotFound
+	}
+	delete(f.byID, id)
+	delete(f.roles, id)
+	return nil
+}
+
+func (f *FakeServiceAccountRepository) TouchLastAuthenticated(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if sa, ok := f.byID[id]; ok {
+		now := time.Now()
+		sa.LastAuthenticatedAt = &now
+	}
+	return nil
+}
+
+func (f *FakeServiceAccountRepository) GrantRole(_ context.Context, g *entity.ServiceAccountRole) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g.AssignedAt = time.Now()
+	f.roles[g.ServiceAccountID] = append(f.roles[g.ServiceAccountID], g)
+	return nil
+}
+
+func (f *FakeServiceAccountRepository) RevokeRole(_ context.Context, serviceAccountID, roleID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	grants := f.roles[serviceAccountID]
+	for i, g := range grants {
+		if g.RoleID == roleID {
+			f.roles[serviceAccountID] = append(grants[:i], grants[i+1:]...)
+			return nil
+		}
+	}
+	return entity.ErrNotFound
+}
+
+func (f *FakeServiceAccountRepository) ListRoles(_ context.Context, serviceAccountID string) ([]*entity.ServiceAccountRole, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.roles[serviceAccountID], nil
+}
+
+// FakeAPIKeyRepository implements repository.APIKeyRepository over an
+// in-memory map, keyed by ID — GetByKeyHash is the one lookup
+// service.ServiceAccountService.Authenticate actually depends on, an
+// exact map lookup here the same way key_hash's real UNIQUE index makes
+// it an exact indexed match in Postgres.
+type FakeAPIKeyRepository struct {
+	mu   sync.Mutex
+	byID map[string]*entity.APIKey
+}
+
+func NewFakeAPIKeyRepository() *FakeAPIKeyRepository {
+	return &FakeAPIKeyRepository{byID: map[string]*entity.APIKey{}}
+}
+
+// Seed inserts a key directly, bypassing Create's ID assignment.
+func (f *FakeAPIKeyRepository) Seed(k *entity.APIKey) *entity.APIKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if k.ID == "" {
+		k.ID = util.NewUUID()
+	}
+	if k.Status == "" {
+		k.Status = entity.APIKeyStatusActive
+	}
+	f.byID[k.ID] = k
+	return k
+}
+
+func (f *FakeAPIKeyRepository) Create(_ context.Context, k *entity.APIKey) error {
+	if !k.HasSingleOwner() {
+		return entity.ErrOwnerConflict
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.byID {
+		if existing.KeyHash == k.KeyHash {
+			return entity.ErrAlreadyExists
+		}
+	}
+	k.ID = util.NewUUID()
+	k.CreatedAt = time.Now()
+	f.byID[k.ID] = k
+	return nil
+}
+
+func (f *FakeAPIKeyRepository) GetByID(_ context.Context, id string) (*entity.APIKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.byID[id]
+	if !ok {
+		return nil, entity.ErrNotFound
+	}
+	cp := *k
+	return &cp, nil
+}
+
+func (f *FakeAPIKeyRepository) GetByKeyHash(_ context.Context, keyHash string) (*entity.APIKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, k := range f.byID {
+		if k.KeyHash == keyHash {
+			cp := *k
+			return &cp, nil
+		}
+	}
+	return nil, entity.ErrNotFound
+}
+
+func (f *FakeAPIKeyRepository) List(_ context.Context, _ string, filter repository.ApiKeyFilter) ([]*entity.APIKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.APIKey
+	for _, k := range f.byID {
+		if filter.OwnerUserID != nil && (k.OwnerUserID == nil || *k.OwnerUserID != *filter.OwnerUserID) {
+			continue
+		}
+		if filter.OwnerServiceAccountID != nil && (k.OwnerServiceAccountID == nil || *k.OwnerServiceAccountID != *filter.OwnerServiceAccountID) {
+			continue
+		}
+		if filter.Status != nil && k.Status != *filter.Status {
+			continue
+		}
+		cp := *k
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (f *FakeAPIKeyRepository) Revoke(_ context.Context, id string, reason *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.byID[id]
+	if !ok {
+		return entity.ErrNotFound
+	}
+	if k.Status != entity.APIKeyStatusActive {
+		return entity.ErrNotFound
+	}
+	now := time.Now()
+	k.Status = entity.APIKeyStatusRevoked
+	k.RevokedAt = &now
+	k.RevokedReason = reason
+	return nil
+}
+
+func (f *FakeAPIKeyRepository) TouchLastUsed(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if k, ok := f.byID[id]; ok {
+		now := time.Now()
+		k.LastUsedAt = &now
+	}
+	return nil
+}
+
+func (f *FakeAPIKeyRepository) AddPermission(_ context.Context, _ *entity.APIKeyPermission) error {
+	return nil
+}
+
+func (f *FakeAPIKeyRepository) RemovePermission(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (f *FakeAPIKeyRepository) ListPermissions(_ context.Context, _ string) ([]*entity.Permission, error) {
+	return nil, nil
 }

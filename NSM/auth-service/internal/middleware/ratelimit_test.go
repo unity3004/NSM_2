@@ -36,12 +36,6 @@ func (s *stubAPILimiter) Allow(_ context.Context, category string, identity rate
 	return s.decision, s.err
 }
 
-func allowHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-}
-
 func rateLimitRequest() *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.RemoteAddr = "203.0.113.7:54321"

@@ -34,6 +34,23 @@ type Claims struct {
 // seconds, which is a detail middleware.Auth shouldn't have to know.
 func (c Claims) ExpiresAtTime() time.Time { return time.Unix(c.ExpiresAt, 0) }
 
+// IsServiceAccount reports whether this token identifies a machine
+// principal (entity.ServiceAccount) rather than a human one
+// (entity.User) — the single, centralized place that inference is made,
+// backed by SessionID's own doc comment above ("absent for
+// service-account tokens"): every human login path
+// (AuthService.issueSession, RefreshTokenService.Refresh) always sets a
+// real session ID, and ServiceAccountService.Authenticate — the only
+// other place Sign is ever called — never does, by construction, because
+// a service account has no session in the human sense. Every caller that
+// needs to branch RBAC/audit/rate-limit behavior on identity type
+// (middleware.RequirePermission, middleware.RateLimit's own
+// requestIdentity, SecretService/SecretPolicyService) goes through this
+// method rather than re-deriving the same "SessionID == \"\"" check
+// independently, so the one signal this token format uses to carry
+// identity type can never drift out of sync with itself.
+func (c Claims) IsServiceAccount() bool { return c.SessionID == "" }
+
 // JWTSigner issues and verifies HS256-signed access tokens. HMAC-SHA256 is
 // a deliberate, minimal choice: it needs nothing beyond crypto/hmac and
 // crypto/sha256 from the standard library, so the service's only two

@@ -47,7 +47,13 @@ type RouterDeps struct {
 	// Secrets Engine's key material is configured, since a policy with
 	// nothing to authorize access to has no reason to exist.
 	SecretPolicyService *service.SecretPolicyService
-	TokenAuth           *util.JWTSigner
+	// AuditTx (Sprint 4 Task 3) is threaded into middleware.RequirePermission
+	// so a denied authorization check is itself audited — see that
+	// middleware's own doc comment. May be nil, the same "audit logging
+	// is best-effort and optional to wire up" allowance every other
+	// AuditTxFunc dependency in this codebase already makes.
+	AuditTx   service.AuditTxFunc
+	TokenAuth *util.JWTSigner
 	// AccessTokens/AccessTokenAudience configure middleware.Authenticate
 	// (Milestone 6A) — the first route in this router to actually require
 	// it, since it's the first milestone with a concrete reason to.
@@ -91,7 +97,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// authentication ("who are you") must resolve before authorization
 	// ("are you allowed to do this") has an identity to check.
 	requirePermission := func(permission string, h http.HandlerFunc) http.Handler {
-		return requireAuth(middleware.RequirePermission(deps.RBACService, permission)(h))
+		return requireAuth(middleware.RequirePermission(deps.RBACService, deps.AuditTx, permission)(h))
 	}
 
 	mux.HandleFunc("GET /healthz", healthCheck)

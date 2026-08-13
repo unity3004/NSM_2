@@ -115,7 +115,13 @@ type CreateSecretInput struct {
 	Path           string
 	Payload        map[string]string
 	ActorUserID    string
-	IPAddress      string
+	// ActorIsServiceAccount (Sprint 5 Task 1) distinguishes a machine
+	// caller from a human one — see authorize's own doc comment for why
+	// this changes which RBAC table ActorUserID is checked against.
+	// Zero-value false, so every pre-existing caller that never sets it
+	// keeps its original, correct "this is a user" behavior unchanged.
+	ActorIsServiceAccount bool
+	IPAddress             string
 }
 
 // CreateSecret implements the flow: authorize, validate path, validate
@@ -129,7 +135,7 @@ type CreateSecretInput struct {
 // method's own doc comment for why Create+CreateVersion as two
 // independent calls could not give this guarantee.
 func (s *SecretService) CreateSecret(ctx context.Context, in CreateSecretInput) (SecretMetadata, error) {
-	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsCreate, in.Path, in.IPAddress, policy.ActionCreate)
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsCreate, in.Path, in.IPAddress, policy.ActionCreate)
 	if err != nil {
 		return SecretMetadata{}, err
 	}
@@ -176,7 +182,7 @@ func (s *SecretService) CreateSecret(ctx context.Context, in CreateSecretInput) 
 		return SecretMetadata{}, err
 	}
 
-	s.recordSecretAudit(ctx, "secret.created", in.ActorUserID, secret, entity.AuditResultSuccess, in.IPAddress,
+	s.recordSecretAudit(ctx, "secret.created", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path, "version": version.Version})
 	return secretMetadataFromEntity(secret), nil
 }
@@ -186,11 +192,12 @@ func (s *SecretService) CreateSecret(ctx context.Context, in CreateSecretInput) 
 // see repository.SecretRepository.GetVersion/GetCurrentVersion, both of
 // which this method delegates to unchanged.
 type GetSecretInput struct {
-	OrganizationID string
-	Path           string
-	Version        *int
-	ActorUserID    string
-	IPAddress      string
+	OrganizationID        string
+	Path                  string
+	Version               *int
+	ActorUserID           string
+	ActorIsServiceAccount bool
+	IPAddress             string
 }
 
 // SecretValue is GetSecret's return value — the one place this service
@@ -215,7 +222,7 @@ type SecretValue struct {
 // caller who lacks secrets:read learns nothing about whether a path
 // exists, let alone its value.
 func (s *SecretService) GetSecret(ctx context.Context, in GetSecretInput) (SecretValue, error) {
-	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsRead, in.Path, in.IPAddress, policy.ActionRead)
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsRead, in.Path, in.IPAddress, policy.ActionRead)
 	if err != nil {
 		return SecretValue{}, err
 	}
@@ -249,7 +256,7 @@ func (s *SecretService) GetSecret(ctx context.Context, in GetSecretInput) (Secre
 		return SecretValue{}, fmt.Errorf("service: unmarshaling decrypted secret payload: %w", err)
 	}
 
-	s.recordSecretAudit(ctx, "secret.read", in.ActorUserID, secret, entity.AuditResultSuccess, in.IPAddress,
+	s.recordSecretAudit(ctx, "secret.read", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path, "version": version.Version})
 	return SecretValue{Metadata: secretMetadataFromEntity(secret), Version: version.Version, Payload: payload}, nil
 }
@@ -259,12 +266,13 @@ func (s *SecretService) GetSecret(ctx context.Context, in GetSecretInput) (Secre
 // version at the moment the update actually applies — see UpdateSecret's
 // own doc comment for why this can never be optional.
 type UpdateSecretInput struct {
-	OrganizationID  string
-	Path            string
-	ExpectedVersion int
-	Payload         map[string]string
-	ActorUserID     string
-	IPAddress       string
+	OrganizationID        string
+	Path                  string
+	ExpectedVersion       int
+	Payload               map[string]string
+	ActorUserID           string
+	ActorIsServiceAccount bool
+	IPAddress             string
 }
 
 // UpdateSecret creates a new immutable version — it never modifies an
@@ -292,7 +300,7 @@ type UpdateSecretInput struct {
 // pathway to a stored row whose AAD version disagrees with its actual
 // version column.
 func (s *SecretService) UpdateSecret(ctx context.Context, in UpdateSecretInput) (SecretMetadata, error) {
-	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsUpdate, in.Path, in.IPAddress, policy.ActionUpdate)
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsUpdate, in.Path, in.IPAddress, policy.ActionUpdate)
 	if err != nil {
 		return SecretMetadata{}, err
 	}
@@ -333,17 +341,18 @@ func (s *SecretService) UpdateSecret(ctx context.Context, in UpdateSecretInput) 
 	secret.CurrentVersion = version.Version
 	secret.UpdatedAt = version.CreatedAt
 
-	s.recordSecretAudit(ctx, "secret.updated", in.ActorUserID, secret, entity.AuditResultSuccess, in.IPAddress,
+	s.recordSecretAudit(ctx, "secret.updated", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path, "version": version.Version})
 	return secretMetadataFromEntity(secret), nil
 }
 
 // DeleteSecretInput is DeleteSecret's argument.
 type DeleteSecretInput struct {
-	OrganizationID string
-	Path           string
-	ActorUserID    string
-	IPAddress      string
+	OrganizationID        string
+	Path                  string
+	ActorUserID           string
+	ActorIsServiceAccount bool
+	IPAddress             string
 }
 
 // DeleteSecret soft-deletes the logical secret (repository.SecretRepository.SoftDelete)
@@ -353,7 +362,7 @@ type DeleteSecretInput struct {
 // deleted_at IS NULL) — "normal read" cannot see a deleted secret.
 // Permanent destruction is not implemented in this phase.
 func (s *SecretService) DeleteSecret(ctx context.Context, in DeleteSecretInput) error {
-	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.OrganizationID, permSecretsDelete, in.Path, in.IPAddress, policy.ActionDelete)
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsDelete, in.Path, in.IPAddress, policy.ActionDelete)
 	if err != nil {
 		return err
 	}
@@ -366,16 +375,17 @@ func (s *SecretService) DeleteSecret(ctx context.Context, in DeleteSecretInput) 
 		return err
 	}
 
-	s.recordSecretAudit(ctx, "secret.deleted", in.ActorUserID, secret, entity.AuditResultSuccess, in.IPAddress,
+	s.recordSecretAudit(ctx, "secret.deleted", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path})
 	return nil
 }
 
 // ListSecretsInput is ListSecrets' argument.
 type ListSecretsInput struct {
-	OrganizationID string
-	Filter         repository.SecretFilter
-	ActorUserID    string
+	OrganizationID        string
+	Filter                repository.SecretFilter
+	ActorUserID           string
+	ActorIsServiceAccount bool
 }
 
 // ListSecrets returns metadata only — path, current version, timestamps —
@@ -393,7 +403,7 @@ type ListSecretsInput struct {
 // list — see that method's own doc comment on why this scales with the
 // caller's rule count, not the secret count.
 func (s *SecretService) ListSecrets(ctx context.Context, in ListSecretsInput) ([]SecretMetadata, error) {
-	if err := s.authorize(ctx, in.ActorUserID, permSecretsList); err != nil {
+	if err := s.authorize(ctx, in.ActorUserID, in.ActorIsServiceAccount, permSecretsList); err != nil {
 		return nil, err
 	}
 	list, err := s.repo.List(ctx, in.OrganizationID, in.Filter)
@@ -405,7 +415,7 @@ func (s *SecretService) ListSecrets(ctx context.Context, in ListSecretsInput) ([
 	for i, sec := range list {
 		paths[i] = sec.Path
 	}
-	allowedPaths, err := s.policies.FilterAllowedPaths(ctx, in.ActorUserID, in.OrganizationID, paths, policy.ActionList)
+	allowedPaths, err := s.policies.FilterAllowedPaths(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, paths, policy.ActionList)
 	if err != nil {
 		return nil, err
 	}
@@ -432,11 +442,25 @@ func (s *SecretService) ListSecrets(ctx context.Context, in ListSecretsInput) ([
 // insufficiently-privileged one — both return entity.ErrForbidden, so a
 // caller can never distinguish "you're not logged in" from "you're logged
 // in but not allowed" through this method's return value alone.
-func (s *SecretService) authorize(ctx context.Context, actorUserID, permission string) error {
+func (s *SecretService) authorize(ctx context.Context, actorUserID string, actorIsServiceAccount bool, permission string) error {
 	if actorUserID == "" {
 		return entity.ErrForbidden
 	}
-	allowed, err := s.rbac.HasPermission(ctx, actorUserID, permission)
+	var allowed bool
+	var err error
+	// Sprint 5 Task 1: a service account's ID only ever exists in
+	// service_account_roles, never user_roles — see
+	// RBACService.HasServiceAccountPermission's own doc comment. Getting
+	// this dispatch wrong doesn't fail open: HasPermission on a
+	// service-account ID simply finds no matching user_roles row and
+	// correctly (if uselessly) denies, which is why this bug class is
+	// "the feature doesn't work," not "the feature is insecure" — but it
+	// must still be right for the feature to work at all.
+	if actorIsServiceAccount {
+		allowed, err = s.rbac.HasServiceAccountPermission(ctx, actorUserID, permission)
+	} else {
+		allowed, err = s.rbac.HasPermission(ctx, actorUserID, permission)
+	}
 	if err != nil {
 		return err
 	}
@@ -486,9 +510,9 @@ func (s *SecretService) authorize(ctx context.Context, actorUserID, permission s
 // normalized one, even for a permission-layer denial reached before
 // validation below — best-effort normalization purely for a readable
 // audit row, never a claim that the raw input was itself valid.
-func (s *SecretService) authorizeSecretAccess(ctx context.Context, actorUserID, organizationID, permission, rawPath, ipAddress string, action policy.Action) (string, error) {
-	if err := s.authorize(ctx, actorUserID, permission); err != nil {
-		s.recordAccessDenied(ctx, actorUserID, util.NormalizeSecretPath(rawPath), action, ipAddress)
+func (s *SecretService) authorizeSecretAccess(ctx context.Context, actorUserID string, actorIsServiceAccount bool, organizationID, permission, rawPath, ipAddress string, action policy.Action) (string, error) {
+	if err := s.authorize(ctx, actorUserID, actorIsServiceAccount, permission); err != nil {
+		s.recordAccessDenied(ctx, actorUserID, actorIsServiceAccount, util.NormalizeSecretPath(rawPath), action, ipAddress)
 		return "", err
 	}
 
@@ -497,12 +521,12 @@ func (s *SecretService) authorizeSecretAccess(ctx context.Context, actorUserID, 
 		return "", err
 	}
 
-	allowed, err := s.policies.Authorize(ctx, actorUserID, organizationID, path, action)
+	allowed, err := s.policies.Authorize(ctx, actorUserID, actorIsServiceAccount, organizationID, path, action)
 	if err != nil {
 		return "", err
 	}
 	if !allowed {
-		s.recordAccessDenied(ctx, actorUserID, path, action, ipAddress)
+		s.recordAccessDenied(ctx, actorUserID, actorIsServiceAccount, path, action, ipAddress)
 		return "", entity.ErrForbidden
 	}
 	return path, nil
@@ -518,19 +542,24 @@ func (s *SecretService) authorizeSecretAccess(ctx context.Context, actorUserID, 
 // concern). action is recorded as "secret.access_denied" regardless of
 // which layer rejected the caller, for the identical reason the returned
 // error is always the same entity.ErrForbidden.
-func (s *SecretService) recordAccessDenied(ctx context.Context, actorUserID, path string, action policy.Action, ipAddress string) {
+func (s *SecretService) recordAccessDenied(ctx context.Context, actorUserID string, actorIsServiceAccount bool, path string, action policy.Action, ipAddress string) {
 	if s.auditTx == nil {
 		return
 	}
+	actorType := entity.AuditActorUser
+	if actorIsServiceAccount {
+		actorType = entity.AuditActorServiceAccount
+	}
 	err := s.auditTx(ctx, func(audit repository.AuditLogRepository) error {
 		return audit.Append(ctx, &entity.AuditLogEntry{
-			ActorType:    entity.AuditActorUser,
+			ActorType:    actorType,
 			ActorID:      strPtr(actorUserID),
 			Action:       "secret.access_denied",
 			ResourceType: strPtr("secret_path"),
 			ResourceID:   strPtr(path),
 			Result:       entity.AuditResultDenied,
 			IPAddress:    strPtr(ipAddress),
+			RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 			Metadata:     map[string]any{"path": path, "action": string(action)},
 		})
 	})
@@ -559,7 +588,7 @@ func (s *SecretService) recordAccessDenied(ctx context.Context, actorUserID, pat
 // metadata never carries plaintext, ciphertext, a nonce, or key material —
 // every call site above passes only path and version, both safe to sit in
 // audit_logs.metadata indefinitely.
-func (s *SecretService) recordSecretAudit(ctx context.Context, action, actorUserID string, secret *entity.Secret, result entity.AuditResult, ipAddress string, metadata map[string]any) {
+func (s *SecretService) recordSecretAudit(ctx context.Context, action, actorUserID string, actorIsServiceAccount bool, secret *entity.Secret, result entity.AuditResult, ipAddress string, metadata map[string]any) {
 	if s.auditTx == nil {
 		return
 	}
@@ -567,16 +596,21 @@ func (s *SecretService) recordSecretAudit(ctx context.Context, action, actorUser
 	if actorUserID != "" {
 		actorID = &actorUserID
 	}
+	actorType := entity.AuditActorUser
+	if actorIsServiceAccount {
+		actorType = entity.AuditActorServiceAccount
+	}
 	err := s.auditTx(ctx, func(audit repository.AuditLogRepository) error {
 		return audit.Append(ctx, &entity.AuditLogEntry{
 			OrganizationID: &secret.OrganizationID,
-			ActorType:      entity.AuditActorUser,
+			ActorType:      actorType,
 			ActorID:        actorID,
 			Action:         action,
 			ResourceType:   strPtr("secret"),
 			ResourceID:     strPtr(secret.ID),
 			Result:         result,
 			IPAddress:      strPtr(ipAddress),
+			RequestID:      strPtr(util.RequestIDFromContext(ctx)),
 			Metadata:       metadata,
 		})
 	})

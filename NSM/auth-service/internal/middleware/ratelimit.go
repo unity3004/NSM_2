@@ -12,7 +12,6 @@ import (
 	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/service"
-	"github.com/acme/auth-service/internal/util"
 
 	"net/http"
 )
@@ -96,17 +95,12 @@ func RateLimit(limiter ratelimit.APIRateLimiter, auditTx service.AuditTxFunc, ca
 func requestIdentity(r *http.Request) ratelimit.RequestIdentity {
 	if claims, ok := ClaimsFromContext(r.Context()); ok {
 		identityType := ratelimit.IdentityUser
-		// SessionID == "" is a machine (service-account) token — see
-		// util.Claims' own doc comment on that field. Checked inline here
-		// rather than through a shared helper: this task doesn't
-		// introduce service accounts as a concept, only reuses the same
-		// signal their own token issuance already establishes.
-		if claims.SessionID == "" {
+		if claims.IsServiceAccount() {
 			identityType = ratelimit.IdentityServiceAccount
 		}
 		return ratelimit.RequestIdentity{Type: identityType, ID: claims.Subject}
 	}
-	return ratelimit.RequestIdentity{Type: ratelimit.IdentityIP, ID: util.ResolveClientIP(r)}
+	return ratelimit.RequestIdentity{Type: ratelimit.IdentityIP, ID: clientIPMW(r)}
 }
 
 // recordRateLimitExceeded is best-effort, matching every other audit
@@ -132,7 +126,7 @@ func recordRateLimitExceeded(ctx context.Context, auditTx service.AuditTxFunc, c
 		id := identity.ID
 		actorID = &id
 	}
-	ip := util.ResolveClientIP(r)
+	ip := clientIPMW(r)
 	requestID := RequestIDFromContext(ctx)
 
 	err := auditTx(ctx, func(audit repository.AuditLogRepository) error {
@@ -142,8 +136,8 @@ func recordRateLimitExceeded(ctx context.Context, auditTx service.AuditTxFunc, c
 			Action:       "rate_limit.exceeded",
 			ResourceType: strPtrMW(category),
 			Result:       entity.AuditResultDenied,
-			IPAddress:    strPtrMW(ip),
-			RequestID:    strPtrMW(requestID),
+			IPAddress:    strPtrOrNil(ip),
+			RequestID:    strPtrOrNil(requestID),
 			Metadata:     map[string]any{"category": category, "identity_type": string(identity.Type)},
 		})
 	})

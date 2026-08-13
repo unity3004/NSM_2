@@ -234,3 +234,34 @@ func (r *rbacRepository) CountUsersWithRole(ctx context.Context, roleID string) 
 		roleID).Scan(&n)
 	return n, err
 }
+
+// ServiceAccountHasPermission mirrors UserHasPermission exactly, joining
+// service_account_roles instead of user_roles — see this method's own
+// interface doc comment for why there is no expiry clause to carry over.
+func (r *rbacRepository) ServiceAccountHasPermission(ctx context.Context, serviceAccountID, resource, action string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM service_account_roles sar
+			JOIN role_permissions rp ON rp.role_id = sar.role_id
+			JOIN permissions p ON p.id = rp.permission_id
+			WHERE sar.service_account_id = $1
+			  AND p.resource = $2 AND p.action = $3
+		)`, serviceAccountID, resource, action).Scan(&exists)
+	return exists, err
+}
+
+func (r *rbacRepository) ServiceAccountPermissions(ctx context.Context, serviceAccountID string) ([]*entity.Permission, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT p.id, p.resource, p.action, p.description
+		FROM service_account_roles sar
+		JOIN role_permissions rp ON rp.role_id = sar.role_id
+		JOIN permissions p ON p.id = rp.permission_id
+		WHERE sar.service_account_id = $1
+		ORDER BY p.resource, p.action`, serviceAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPermissions(rows)
+}

@@ -49,4 +49,22 @@ type RBACRepository interface {
 	UserPermissions(ctx context.Context, userID string) ([]*entity.Permission, error)
 	// CountUsersWithRole backs the Roles page's "number of users" column.
 	CountUsersWithRole(ctx context.Context, roleID string) (int, error)
+
+	// ServiceAccountHasPermission is UserHasPermission's machine-identity
+	// mirror — joins service_account_roles -> role_permissions ->
+	// permissions instead of user_roles, the same "the actor row you join
+	// through changes, the rest of the query shape doesn't" property
+	// entity.ServiceAccountRole/service_account_roles share with
+	// entity.UserRole/user_roles by design (Sprint 5 Task 1). Service
+	// account role grants have no expires_at column (see
+	// service_account_roles' own migration) — a machine identity's role
+	// is administered directly, not JIT-granted the way a human's
+	// occasionally is, so there is nothing to filter here that
+	// UserHasPermission's own expiry clause filters.
+	ServiceAccountHasPermission(ctx context.Context, serviceAccountID, resource, action string) (bool, error)
+	// ServiceAccountPermissions is UserPermissions' machine-identity
+	// mirror — backs the service account detail page's own "permissions
+	// derived from roles" display, the same role UserPermissions plays for
+	// the user detail page.
+	ServiceAccountPermissions(ctx context.Context, serviceAccountID string) ([]*entity.Permission, error)
 }

@@ -45,7 +45,7 @@ func newTestPolicyEnv(t *testing.T) *testPolicyEnv {
 	rbacRepo.Grant(policyAdminID, permSecretPoliciesDelete)
 	rbacRepo.Grant(policyAdminID, permSecretPoliciesAssign)
 
-	svc := NewSecretPolicyService(repo, users, rbacSvc, auditTx)
+	svc := NewSecretPolicyService(repo, users, mocks.NewFakeServiceAccountRepository(), rbacSvc, auditTx)
 	return &testPolicyEnv{svc: svc, repo: repo, users: users, rbac: rbacRepo, audit: audit}
 }
 
@@ -210,7 +210,7 @@ func TestSecretPolicyService_DeletePolicy_RemovesGrantEntirely(t *testing.T) {
 		t.Fatalf("GrantRole() error = %v", err)
 	}
 
-	allowed, err := env.svc.Authorize(t.Context(), "user-dev", policyTestOrgID, "dev/database", policy.ActionRead)
+	allowed, err := env.svc.Authorize(t.Context(), "user-dev", false, policyTestOrgID, "dev/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() before delete, error = %v", err)
 	}
@@ -222,7 +222,7 @@ func TestSecretPolicyService_DeletePolicy_RemovesGrantEntirely(t *testing.T) {
 		t.Fatalf("DeletePolicy() error = %v", err)
 	}
 
-	allowed, err = env.svc.Authorize(t.Context(), "user-dev", policyTestOrgID, "dev/database", policy.ActionRead)
+	allowed, err = env.svc.Authorize(t.Context(), "user-dev", false, policyTestOrgID, "dev/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() after delete, error = %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSecretPolicyService_Authorize_DeniesByDefault_NoPolicyAtAll(t *testing.
 	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: "user-x", RoleID: policyRoleDev}); err != nil {
 		t.Fatalf("GrantRole() error = %v", err)
 	}
-	allowed, err := env.svc.Authorize(t.Context(), "user-x", policyTestOrgID, "dev/database", policy.ActionRead)
+	allowed, err := env.svc.Authorize(t.Context(), "user-x", false, policyTestOrgID, "dev/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() error = %v", err)
 	}
@@ -324,7 +324,7 @@ func TestSecretPolicyService_Authorize_MatchingPolicyGrantsAccess(t *testing.T) 
 		t.Fatalf("GrantRole() error = %v", err)
 	}
 
-	allowed, err := env.svc.Authorize(t.Context(), "user-dev", policyTestOrgID, "dev/database", policy.ActionRead)
+	allowed, err := env.svc.Authorize(t.Context(), "user-dev", false, policyTestOrgID, "dev/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() error = %v", err)
 	}
@@ -332,7 +332,7 @@ func TestSecretPolicyService_Authorize_MatchingPolicyGrantsAccess(t *testing.T) 
 		t.Error("Authorize() for dev/database read with a matching dev/* allow policy = false, want true")
 	}
 
-	allowed, err = env.svc.Authorize(t.Context(), "user-dev", policyTestOrgID, "prod/database", policy.ActionRead)
+	allowed, err = env.svc.Authorize(t.Context(), "user-dev", false, policyTestOrgID, "prod/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() error = %v", err)
 	}
@@ -353,7 +353,7 @@ func TestSecretPolicyService_Authorize_SimilarPathDoesNotBypass(t *testing.T) {
 		t.Fatalf("GrantRole() error = %v", err)
 	}
 
-	allowed, err := env.svc.Authorize(t.Context(), "user-prod", policyTestOrgID, "prod/database", policy.ActionRead)
+	allowed, err := env.svc.Authorize(t.Context(), "user-prod", false, policyTestOrgID, "prod/database", policy.ActionRead)
 	if err != nil {
 		t.Fatalf("Authorize() error = %v", err)
 	}
@@ -382,11 +382,11 @@ func TestSecretPolicyService_Authorize_ExplicitDenyPrecedence(t *testing.T) {
 		t.Fatalf("GrantRole() error = %v", err)
 	}
 
-	allowed, err := env.svc.Authorize(t.Context(), "user-prod", policyTestOrgID, "prod/database", policy.ActionRead)
+	allowed, err := env.svc.Authorize(t.Context(), "user-prod", false, policyTestOrgID, "prod/database", policy.ActionRead)
 	if err != nil || !allowed {
 		t.Errorf("Authorize(prod/database) = %v, %v; want true, nil", allowed, err)
 	}
-	allowed, err = env.svc.Authorize(t.Context(), "user-prod", policyTestOrgID, "prod/secrets/token", policy.ActionRead)
+	allowed, err = env.svc.Authorize(t.Context(), "user-prod", false, policyTestOrgID, "prod/secrets/token", policy.ActionRead)
 	if err != nil || allowed {
 		t.Errorf("Authorize(prod/secrets/token) = %v, %v; want false, nil — explicit deny must win over the broader allow", allowed, err)
 	}
@@ -407,7 +407,7 @@ func TestSecretPolicyService_Authorize_MultiplePoliciesDeterministic(t *testing.
 	}
 
 	for i := 0; i < 5; i++ {
-		allowed, err := env.svc.Authorize(t.Context(), "user-multi", policyTestOrgID, "staging/db", policy.ActionRead)
+		allowed, err := env.svc.Authorize(t.Context(), "user-multi", false, policyTestOrgID, "staging/db", policy.ActionRead)
 		if err != nil || !allowed {
 			t.Fatalf("iteration %d: Authorize(staging/db) = %v, %v; want true, nil", i, allowed, err)
 		}
@@ -430,7 +430,7 @@ func TestSecretPolicyService_FilterAllowedPaths_OnlyReturnsAuthorizedPaths(t *te
 	}
 
 	all := []string{"dev/database", "dev/api", "prod/database", "prod/payment"}
-	allowed, err := env.svc.FilterAllowedPaths(t.Context(), "user-dev", policyTestOrgID, all, policy.ActionList)
+	allowed, err := env.svc.FilterAllowedPaths(t.Context(), "user-dev", false, policyTestOrgID, all, policy.ActionList)
 	if err != nil {
 		t.Fatalf("FilterAllowedPaths() error = %v", err)
 	}
@@ -447,7 +447,7 @@ func TestSecretPolicyService_FilterAllowedPaths_OnlyReturnsAuthorizedPaths(t *te
 
 func TestSecretPolicyService_FilterAllowedPaths_EmptyInput(t *testing.T) {
 	env := newTestPolicyEnv(t)
-	allowed, err := env.svc.FilterAllowedPaths(t.Context(), policyAdminID, policyTestOrgID, nil, policy.ActionList)
+	allowed, err := env.svc.FilterAllowedPaths(t.Context(), policyAdminID, false, policyTestOrgID, nil, policy.ActionList)
 	if err != nil {
 		t.Fatalf("FilterAllowedPaths() error = %v", err)
 	}
@@ -466,7 +466,7 @@ func TestSecretPolicyService_GrantFullAccessToRole_GrantsEveryAction(t *testing.
 		t.Fatalf("GrantRole() error = %v", err)
 	}
 	for _, action := range []policy.Action{policy.ActionRead, policy.ActionCreate, policy.ActionUpdate, policy.ActionDelete, policy.ActionList} {
-		allowed, err := env.svc.Authorize(t.Context(), "user-full", policyTestOrgID, "any/path/at/all", action)
+		allowed, err := env.svc.Authorize(t.Context(), "user-full", false, policyTestOrgID, "any/path/at/all", action)
 		if err != nil || !allowed {
 			t.Errorf("Authorize(action=%s) with full access = %v, %v; want true, nil", action, allowed, err)
 		}

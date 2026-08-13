@@ -52,7 +52,7 @@ func newTestSecretServiceEnv(t *testing.T, db *sql.DB) *service.SecretService {
 			return fn(postgres.NewAuditLogRepository(tx))
 		})
 	}
-	secretPolicySvc := service.NewSecretPolicyService(secretPolicyRepo, userRepo, rbacSvc, auditTx)
+	secretPolicySvc := service.NewSecretPolicyService(secretPolicyRepo, userRepo, postgres.NewServiceAccountRepository(db), rbacSvc, auditTx)
 
 	return service.NewSecretService(secretRepo, enc, rbacSvc, secretPolicySvc, auditTx)
 }

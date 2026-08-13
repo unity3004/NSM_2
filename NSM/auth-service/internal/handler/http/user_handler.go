@@ -269,3 +269,15 @@ func actorUserID(r *http.Request) string {
 	}
 	return claims.Subject
 }
+
+// isServiceAccount reports whether the request's verified identity (if
+// any) is a service account rather than a human user — see
+// util.Claims.IsServiceAccount's own doc comment. An unauthenticated
+// request (no claims at all) is never a service account by this
+// function's definition; every route that could reach here without
+// claims already rejects the request earlier (requireAuth/requirePermission),
+// so this is only ever consulted once an identity is known to exist.
+func isServiceAccount(r *http.Request) bool {
+	claims, ok := ClaimsFromRequest(r)
+	return ok && claims.IsServiceAccount()
+}

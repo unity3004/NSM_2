@@ -1,6 +1,10 @@
 package dto
 
-import "time"
+import (
+	"time"
+
+	"github.com/acme/auth-service/internal/entity"
+)
 
 // ApiKeyCreateRequest matches components.schemas.ApiKeyCreate. Exactly one
 // of OwnerUserID / OwnerServiceAccountID must be set — validated here for a
@@ -48,4 +52,34 @@ type ApiKeyResponse struct {
 type ApiKeyCreatedResponse struct {
 	ApiKeyResponse
 	Secret string `json:"secret"`
+}
+
+// ApiKeyResponseFromEntity converts entity.APIKey to the wire shape —
+// KeyHash is deliberately not one of ApiKeyResponse's fields at all (see
+// that type's own doc comment), so there is no field of this function's
+// return value it could even be assigned to.
+func ApiKeyResponseFromEntity(k *entity.APIKey) ApiKeyResponse {
+	return ApiKeyResponse{
+		ID:                    k.ID,
+		OrganizationID:        k.OrganizationID,
+		OwnerUserID:           k.OwnerUserID,
+		OwnerServiceAccountID: k.OwnerServiceAccountID,
+		Name:                  k.Name,
+		KeyPrefix:             k.KeyPrefix,
+		Status:                string(k.Status),
+		LastUsedAt:            k.LastUsedAt,
+		ExpiresAt:             k.ExpiresAt,
+		CreatedAt:             k.CreatedAt,
+		RevokedAt:             k.RevokedAt,
+		RevokedReason:         k.RevokedReason,
+	}
+}
+
+// ApiKeyCreatedResponseFrom builds the one response that carries secret —
+// callers must supply it explicitly (never read off k, which never holds
+// a raw secret in the first place — see entity.APIKey's own doc comment)
+// so there is no path through this function that could accidentally leak
+// a hash in secret's place.
+func ApiKeyCreatedResponseFrom(k *entity.APIKey, secret string) ApiKeyCreatedResponse {
+	return ApiKeyCreatedResponse{ApiKeyResponse: ApiKeyResponseFromEntity(k), Secret: secret}
 }

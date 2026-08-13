@@ -82,6 +82,9 @@ func main() {
 	roleRepo := postgres.NewRoleRepository(db)
 	permissionRepo := postgres.NewPermissionRepository(db)
 	rbacRepo := postgres.NewRBACRepository(db)
+	// serviceAccountRepo (Sprint 5 Task 1) backs ServiceAccountService —
+	// the machine-identity counterpart to userRepo above.
+	serviceAccountRepo := postgres.NewServiceAccountRepository(db)
 
 	// registerTx is the one place outside internal/repository/postgres
 	// itself that constructs a Postgres repository directly — exactly the
@@ -263,7 +266,7 @@ func main() {
 		// the Secrets Engine enabled at all: deny-by-default only means
 		// something if this is actually consulted.
 		secretPolicyRepo := postgres.NewSecretPolicyRepository(db)
-		secretPolicySvc = service.NewSecretPolicyService(secretPolicyRepo, userRepo, rbacSvc, loginAuditTx)
+		secretPolicySvc = service.NewSecretPolicyService(secretPolicyRepo, userRepo, serviceAccountRepo, rbacSvc, loginAuditTx)
 		keyProvider, err := secrets.NewDevKeyProvider(cfg.Secrets.DevMasterKeyID, cfg.Secrets.DevMasterKey)
 		if err != nil {
 			logger.Error("failed to construct secrets key provider", zap.Error(err))

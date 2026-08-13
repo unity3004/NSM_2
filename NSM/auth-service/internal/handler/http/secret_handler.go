@@ -40,9 +40,10 @@ type secretHandler struct {
 // honesty rather than inventing one here first.
 func (h *secretHandler) list(w http.ResponseWriter, r *http.Request) {
 	items, err := h.svc.ListSecrets(r.Context(), service.ListSecretsInput{
-		OrganizationID: organizationIDFromRequest(r),
-		Filter:         repository.SecretFilter{Limit: 20},
-		ActorUserID:    actorUserID(r),
+		OrganizationID:        organizationIDFromRequest(r),
+		Filter:                repository.SecretFilter{Limit: 20},
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
 	})
 	if err != nil {
 		writeServiceError(w, r, err)
@@ -70,11 +71,12 @@ func (h *secretHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta, err := h.svc.CreateSecret(r.Context(), service.CreateSecretInput{
-		OrganizationID: organizationIDFromRequest(r),
-		Path:           req.Path,
-		Payload:        req.Data,
-		ActorUserID:    actorUserID(r),
-		IPAddress:      clientIP(r),
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  req.Path,
+		Payload:               req.Data,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
 	})
 	if err != nil {
 		writeServiceError(w, r, err)
@@ -116,11 +118,12 @@ func (h *secretHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	val, err := h.svc.GetSecret(r.Context(), service.GetSecretInput{
-		OrganizationID: organizationIDFromRequest(r),
-		Path:           path,
-		Version:        version,
-		ActorUserID:    actorUserID(r),
-		IPAddress:      clientIP(r),
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  path,
+		Version:               version,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
 	})
 	if err != nil {
 		writeServiceError(w, r, err)
@@ -158,12 +161,13 @@ func (h *secretHandler) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta, err := h.svc.UpdateSecret(r.Context(), service.UpdateSecretInput{
-		OrganizationID:  organizationIDFromRequest(r),
-		Path:            path,
-		ExpectedVersion: expected,
-		Payload:         req.Data,
-		ActorUserID:     actorUserID(r),
-		IPAddress:       clientIP(r),
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  path,
+		ExpectedVersion:       expected,
+		Payload:               req.Data,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
 	})
 	if err != nil {
 		writeServiceError(w, r, err)
@@ -178,10 +182,11 @@ func (h *secretHandler) update(w http.ResponseWriter, r *http.Request) {
 func (h *secretHandler) delete(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	err := h.svc.DeleteSecret(r.Context(), service.DeleteSecretInput{
-		OrganizationID: organizationIDFromRequest(r),
-		Path:           path,
-		ActorUserID:    actorUserID(r),
-		IPAddress:      clientIP(r),
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  path,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
 	})
 	if err != nil {
 		writeServiceError(w, r, err)

@@ -17,6 +17,13 @@ const (
 	OperationLogin     = "login"
 	OperationRefresh   = "refresh"
 	OperationBootstrap = "bootstrap"
+	// OperationServiceAccountAuth (Sprint 5 Task 1) guards
+	// ServiceAccountService.Authenticate — the machine-credential
+	// equivalent of OperationLogin. Dimensions.Account carries the service
+	// account ID rather than a normalized email for this operation; see
+	// that field's own doc comment on why every caller passes an already-
+	// normalized, pre-resolved identifier and never a raw credential.
+	OperationServiceAccountAuth = "service_account_auth"
 )
 
 // Dimensions identifies the independent axes an authentication attempt is

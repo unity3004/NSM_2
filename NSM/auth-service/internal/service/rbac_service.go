@@ -51,3 +51,23 @@ func (s *RBACService) HasPermission(ctx context.Context, userID, permission stri
 func (s *RBACService) EffectivePermissions(ctx context.Context, userID string) ([]*entity.Permission, error) {
 	return s.rbac.UserPermissions(ctx, userID)
 }
+
+// HasServiceAccountPermission is HasPermission's machine-identity mirror
+// (Sprint 5 Task 1) — every caller that needs to authorize a request
+// branches between this and HasPermission based on
+// util.Claims.IsServiceAccount(), never guesses from the ID's shape alone
+// (a service account ID and a user ID are both opaque UUIDs — nothing
+// about the string itself says which table it belongs to).
+func (s *RBACService) HasServiceAccountPermission(ctx context.Context, serviceAccountID, permission string) (bool, error) {
+	resource, action, ok := strings.Cut(permission, ":")
+	if !ok {
+		return false, fmt.Errorf("service: malformed permission string %q (want \"resource:action\")", permission)
+	}
+	return s.rbac.ServiceAccountHasPermission(ctx, serviceAccountID, resource, action)
+}
+
+// ServiceAccountEffectivePermissions is EffectivePermissions' machine-identity
+// mirror — backs the service account detail page's own permissions display.
+func (s *RBACService) ServiceAccountEffectivePermissions(ctx context.Context, serviceAccountID string) ([]*entity.Permission, error) {
+	return s.rbac.ServiceAccountPermissions(ctx, serviceAccountID)
+}
