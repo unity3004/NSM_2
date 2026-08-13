@@ -1448,3 +1448,137 @@ func (f *FakeAPIKeyRepository) RemovePermission(_ context.Context, _, _ string) 
 func (f *FakeAPIKeyRepository) ListPermissions(_ context.Context, _ string) ([]*entity.Permission, error) {
 	return nil, nil
 }
+
+// FakeLeaseRepository implements repository.LeaseRepository over an
+// in-memory map, keyed by ID — Renew/Revoke both mirror
+// postgres.leaseRepository's own `WHERE status = 'active'` guards exactly
+// (Renew fails entity.ErrNotFound on a non-active row via
+// checkRowsAffected's own "zero rows affected" convention; Revoke returns
+// transitioned=false, nil — never an error — for the identical case, see
+// that method's own doc comment) so a unit test exercising "renew an
+// already-revoked lease" or "revoke twice" against this fake proves the
+// same behavior test/integration's real-Postgres tests separately prove
+// against the genuine schema.
+type FakeLeaseRepository struct {
+	mu   sync.Mutex
+	byID map[string]*entity.Lease
+	// FailNextCreate, if non-nil, is returned by the next Create call
+	// instead of succeeding, then reset to nil — the same fault-injection
+	// convention as FakeAuditLogRepository.FailNext, for exercising
+	// LeaseService.Create's own compensating-credential-revocation path
+	// (see that method's own doc comment) without a real database to
+	// actually break.
+	FailNextCreate error
+}
+
+func NewFakeLeaseRepository() *FakeLeaseRepository {
+	return &FakeLeaseRepository{byID: map[string]*entity.Lease{}}
+}
+
+// Seed inserts a lease directly, bypassing Create's ID/CreatedAt
+// assignment — the natural way a test arranges "given a lease already in
+// this state" (e.g. one already expired or already revoked).
+func (f *FakeLeaseRepository) Seed(l *entity.Lease) *entity.Lease {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l.ID == "" {
+		l.ID = util.NewUUID()
+	}
+	if l.Status == "" {
+		l.Status = entity.LeaseStatusActive
+	}
+	if l.CreatedAt.IsZero() {
+		l.CreatedAt = time.Now()
+	}
+	f.byID[l.ID] = l
+	return l
+}
+
+func (f *FakeLeaseRepository) Create(_ context.Context, l *entity.Lease) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailNextCreate != nil {
+		err := f.FailNextCreate
+		f.FailNextCreate = nil
+		return err
+	}
+	l.ID = util.NewUUID()
+	l.CreatedAt = time.Now()
+	f.byID[l.ID] = l
+	return nil
+}
+
+func (f *FakeLeaseRepository) GetByID(_ context.Context, id string) (*entity.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.byID[id]
+	if !ok {
+		return nil, entity.ErrNotFound
+	}
+	cp := *l
+	return &cp, nil
+}
+
+func (f *FakeLeaseRepository) List(_ context.Context, organizationID string, filter repository.LeaseFilter) ([]*entity.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.Lease
+	for _, l := range f.byID {
+		if l.OrganizationID != organizationID {
+			continue
+		}
+		if filter.OwnerIdentityType != nil && l.OwnerIdentityType != *filter.OwnerIdentityType {
+			continue
+		}
+		if filter.OwnerIdentityID != nil && l.OwnerIdentityID != *filter.OwnerIdentityID {
+			continue
+		}
+		if filter.Status != nil && l.Status != *filter.Status {
+			continue
+		}
+		cp := *l
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
+}
+
+func (f *FakeLeaseRepository) Renew(_ context.Context, id string, newTTL time.Duration, newExpiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.byID[id]
+	if !ok || l.Status != entity.LeaseStatusActive {
+		return entity.ErrNotFound
+	}
+	l.TTL, l.ExpiresAt = newTTL, newExpiresAt
+	return nil
+}
+
+func (f *FakeLeaseRepository) Revoke(_ context.Context, id string, reason *string, at time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.byID[id]
+	if !ok || l.Status != entity.LeaseStatusActive {
+		return false, nil
+	}
+	l.Status = entity.LeaseStatusRevoked
+	l.RevokedAt, l.RevokedReason = &at, reason
+	return true, nil
+}
+
+func (f *FakeLeaseRepository) ExpireOverdue(_ context.Context, at time.Time) ([]*entity.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*entity.Lease
+	for _, l := range f.byID {
+		if l.Status == entity.LeaseStatusActive && !at.Before(l.ExpiresAt) {
+			l.Status = entity.LeaseStatusExpired
+			cp := *l
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}

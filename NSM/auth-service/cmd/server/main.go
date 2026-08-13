@@ -18,6 +18,7 @@ import (
 	"github.com/acme/auth-service/internal/config"
 	"github.com/acme/auth-service/internal/database"
 	httphandler "github.com/acme/auth-service/internal/handler/http"
+	"github.com/acme/auth-service/internal/leasing"
 	"github.com/acme/auth-service/internal/logging"
 	"github.com/acme/auth-service/internal/ratelimit"
 	redisclient "github.com/acme/auth-service/internal/redis"
@@ -44,6 +45,11 @@ func main() {
 		bootstrap.Error("failed to load configuration", zap.Error(err))
 		os.Exit(1)
 	}
+	// Sprint 4 Task 4: must happen before the router (and therefore any
+	// request) can possibly run — see util.SetTrustedProxies' own doc
+	// comment for why this is a package-level value configured once here
+	// rather than threaded through every handler.
+	util.SetTrustedProxies(cfg.Server.TrustedProxies)
 
 	logger, err := logging.New(cfg.Log.Level, cfg.Log.Format, cfg.Environment, "auth-service")
 	if err != nil {
@@ -82,9 +88,11 @@ func main() {
 	roleRepo := postgres.NewRoleRepository(db)
 	permissionRepo := postgres.NewPermissionRepository(db)
 	rbacRepo := postgres.NewRBACRepository(db)
-	// serviceAccountRepo (Sprint 5 Task 1) backs ServiceAccountService —
-	// the machine-identity counterpart to userRepo above.
+	// serviceAccountRepo/apiKeyRepo (Sprint 5 Task 1) back
+	// ServiceAccountService — the machine-identity counterpart to
+	// userRepo above.
 	serviceAccountRepo := postgres.NewServiceAccountRepository(db)
+	apiKeyRepo := postgres.NewAPIKeyRepository(db)
 
 	// registerTx is the one place outside internal/repository/postgres
 	// itself that constructs a Postgres repository directly — exactly the
@@ -161,6 +169,15 @@ func main() {
 	// hold a non-nil AuthAbuseProtection either way; see
 	// ratelimit.NoopAuthAbuseProtection's own doc comment.
 	var abuseProtection ratelimit.AuthAbuseProtection = ratelimit.NoopAuthAbuseProtection{}
+	// apiRateLimiter (Sprint 4 Task 4) is the general request throttle —
+	// see internal/ratelimit's own package doc comment for why this is a
+	// distinct component from abuseProtection above, not a replacement
+	// for it. Deliberately constructed from the *same* redisClient
+	// connection abuseProtection uses below, not a second one — this
+	// task's own "do not create a second Redis client unnecessarily"
+	// instruction — since both are Redis-backed rate limiters serving
+	// the same process against the same Redis deployment.
+	var apiRateLimiter ratelimit.APIRateLimiter = ratelimit.NoopAPIRateLimiter{}
 	if cfg.RateLimit.Enabled {
 		redisClient, err := redisclient.NewClient(ctx, cfg.Redis)
 		if err != nil {
@@ -168,6 +185,70 @@ func main() {
 			os.Exit(1)
 		}
 		defer redisClient.Close()
+
+		apiRateLimiter = ratelimit.NewRedisAPIRateLimiter(redisClient, ratelimit.APIRateLimiterConfig{
+			Categories: map[string]ratelimit.CategoryConfig{
+				"secrets-read": {
+					User:           windowPolicy(cfg.RateLimit.API.SecretsRead.UserWindow, cfg.RateLimit.API.SecretsRead.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.SecretsRead.ServiceAccountWindow, cfg.RateLimit.API.SecretsRead.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.SecretsRead.FailOpen,
+				},
+				"secrets-write": {
+					User:           windowPolicy(cfg.RateLimit.API.SecretsWrite.UserWindow, cfg.RateLimit.API.SecretsWrite.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.SecretsWrite.ServiceAccountWindow, cfg.RateLimit.API.SecretsWrite.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.SecretsWrite.FailOpen,
+				},
+				"policy-admin": {
+					User:           windowPolicy(cfg.RateLimit.API.PolicyAdmin.UserWindow, cfg.RateLimit.API.PolicyAdmin.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.PolicyAdmin.ServiceAccountWindow, cfg.RateLimit.API.PolicyAdmin.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.PolicyAdmin.FailOpen,
+				},
+				"user-admin": {
+					User:           windowPolicy(cfg.RateLimit.API.UserAdmin.UserWindow, cfg.RateLimit.API.UserAdmin.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.UserAdmin.ServiceAccountWindow, cfg.RateLimit.API.UserAdmin.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.UserAdmin.FailOpen,
+				},
+				"audit-read": {
+					User:           windowPolicy(cfg.RateLimit.API.AuditRead.UserWindow, cfg.RateLimit.API.AuditRead.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.AuditRead.ServiceAccountWindow, cfg.RateLimit.API.AuditRead.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.AuditRead.FailOpen,
+				},
+				"auth-register": {
+					IP:       windowPolicy(cfg.RateLimit.API.AuthRegister.IPWindow, cfg.RateLimit.API.AuthRegister.IPLimit),
+					FailOpen: cfg.RateLimit.API.AuthRegister.FailOpen,
+				},
+				"auth-logout": {
+					User:           windowPolicy(cfg.RateLimit.API.AuthLogout.UserWindow, cfg.RateLimit.API.AuthLogout.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.AuthLogout.ServiceAccountWindow, cfg.RateLimit.API.AuthLogout.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.AuthLogout.FailOpen,
+				},
+				"service-account-admin": {
+					User:           windowPolicy(cfg.RateLimit.API.ServiceAccountAdmin.UserWindow, cfg.RateLimit.API.ServiceAccountAdmin.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.ServiceAccountAdmin.ServiceAccountWindow, cfg.RateLimit.API.ServiceAccountAdmin.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.ServiceAccountAdmin.FailOpen,
+				},
+				"lease-create": {
+					User:           windowPolicy(cfg.RateLimit.API.LeaseCreate.UserWindow, cfg.RateLimit.API.LeaseCreate.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.LeaseCreate.ServiceAccountWindow, cfg.RateLimit.API.LeaseCreate.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.LeaseCreate.FailOpen,
+				},
+				"lease-read": {
+					User:           windowPolicy(cfg.RateLimit.API.LeaseRead.UserWindow, cfg.RateLimit.API.LeaseRead.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.LeaseRead.ServiceAccountWindow, cfg.RateLimit.API.LeaseRead.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.LeaseRead.FailOpen,
+				},
+				"lease-renew": {
+					User:           windowPolicy(cfg.RateLimit.API.LeaseRenew.UserWindow, cfg.RateLimit.API.LeaseRenew.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.LeaseRenew.ServiceAccountWindow, cfg.RateLimit.API.LeaseRenew.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.LeaseRenew.FailOpen,
+				},
+				"lease-revoke": {
+					User:           windowPolicy(cfg.RateLimit.API.LeaseRevoke.UserWindow, cfg.RateLimit.API.LeaseRevoke.UserLimit),
+					ServiceAccount: windowPolicy(cfg.RateLimit.API.LeaseRevoke.ServiceAccountWindow, cfg.RateLimit.API.LeaseRevoke.ServiceAccountLimit),
+					FailOpen:       cfg.RateLimit.API.LeaseRevoke.FailOpen,
+				},
+			},
+		})
 
 		abuseProtection = ratelimit.NewRedisAuthAbuseProtection(redisClient, ratelimit.Config{
 			FailClosed: cfg.RateLimit.FailClosed,
@@ -195,6 +276,20 @@ func main() {
 				ratelimit.OperationBootstrap: {
 					IP: &ratelimit.DimensionPolicy{
 						Window: cfg.RateLimit.Bootstrap.IPWindow, Limit: cfg.RateLimit.Bootstrap.IPLimit, BlockDuration: cfg.RateLimit.Bootstrap.BlockDuration,
+					},
+				},
+				// Sprint 5 Task 1: machine-credential brute-force
+				// protection, the same three-dimension shape Login uses —
+				// see ServiceAccountAuthRateLimitConfig's own doc comment.
+				ratelimit.OperationServiceAccountAuth: {
+					IP: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.ServiceAccountAuth.IPWindow, Limit: cfg.RateLimit.ServiceAccountAuth.IPLimit, BlockDuration: cfg.RateLimit.ServiceAccountAuth.BlockDuration,
+					},
+					Account: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.ServiceAccountAuth.ServiceAccountWindow, Limit: cfg.RateLimit.ServiceAccountAuth.ServiceAccountLimit, BlockDuration: cfg.RateLimit.ServiceAccountAuth.BlockDuration,
+					},
+					Pair: &ratelimit.DimensionPolicy{
+						Window: cfg.RateLimit.ServiceAccountAuth.PairWindow, Limit: cfg.RateLimit.ServiceAccountAuth.PairLimit, BlockDuration: cfg.RateLimit.ServiceAccountAuth.BlockDuration,
 					},
 				},
 			},
@@ -241,6 +336,25 @@ func main() {
 	)
 	roleSvc := service.NewRoleService(roleRepo, permissionRepo, rbacRepo)
 	rbacSvc := service.NewRBACService(rbacRepo)
+	// serviceAccountSvc (Sprint 5 Task 1) reuses tokenSigner (the same
+	// *util.JWTSigner human login already signs with — see
+	// util.Claims.IsServiceAccount's own doc comment on why a shared
+	// signer is exactly what lets one middleware.Auth verify both kinds
+	// of token) and abuseProtection (the same Redis-backed
+	// AuthAbuseProtection instance Login/Refresh/Bootstrap already share —
+	// this task's own "reuse the existing Redis infrastructure" instruction,
+	// applied to authentication abuse protection the way Sprint 4 Task 4
+	// already applied it to general request throttling).
+	serviceAccountSvc := service.NewServiceAccountService(
+		serviceAccountRepo, apiKeyRepo, tokenSigner, abuseProtection, cfg.RateLimit.RetryAfter, loginAuditTx,
+	)
+	// AuditService (Sprint 4 Task 3) reads directly off a plain,
+	// AuditService (Sprint 4 Task 3) reads directly off a plain,
+	// non-transactional repository (unlike loginAuditTx below, which
+	// exists for one-Append-inside-a-transaction writes) — List/GetByID
+	// need no advisory lock or hash-chain write, only a read, so there's
+	// no reason to pay for a transaction here.
+	auditSvc := service.NewAuditService(postgres.NewAuditLogRepository(db), rbacSvc, loginAuditTx)
 
 	// secretSvc (Sprint 3 Phase 4) is only constructed when the Secrets
 	// Engine's key material is actually configured — see
@@ -256,6 +370,19 @@ func main() {
 	var secretSvc *service.SecretService
 	var secretPolicySvc *service.SecretPolicyService
 	var keyRotationSvc *service.KeyRotationService
+	// leaseSvc (Sprint 5 Task 2) is constructed alongside secretSvc, under
+	// the identical "Secrets Engine enabled" guard — LeaseService reuses
+	// secretPolicySvc for path authorization, so there is nothing for it
+	// to authorize a lease's resource path against when that isn't
+	// configured either.
+	var leaseSvc *service.LeaseService
+	// devCredentialProvider is the one DynamicCredentialProvider this
+	// task registers — see leasing.DevCredentialProvider's own doc
+	// comment on why no production provider exists yet. Constructed
+	// unconditionally (it needs no configuration at all, unlike
+	// DevKeyProvider) but only ever wired into leaseSvc below, when the
+	// Secrets Engine itself is enabled.
+	devCredentialProvider := leasing.NewDevCredentialProvider()
 	if cfg.Secrets.DevMasterKey == "" {
 		logger.Warn("AUTH_SECRETS_DEV_MASTER_KEY not set — Secrets Engine disabled, /v1/secrets routes will not be registered")
 	} else {
@@ -293,6 +420,26 @@ func main() {
 		// SecretService.recordSecretAudit's doc comment).
 		secretSvc = service.NewSecretService(secretRepo, encryptionSvc, rbacSvc, secretPolicySvc, loginAuditTx)
 
+		// leaseSvc (Sprint 5 Task 2): dev-credential is the only
+		// DynamicCredentialProvider registered today — see
+		// leasing.DevCredentialProvider's own doc comment for why this
+		// task deliberately implements no production credential backend.
+		// A future provider (Postgres, cloud IAM, etc.) adds a second map
+		// entry here, never a change to LeaseService's own code.
+		leaseSvc = service.NewLeaseService(service.LeaseServiceDeps{
+			Leases:   postgres.NewLeaseRepository(db),
+			RBAC:     rbacSvc,
+			Policies: secretPolicySvc,
+			Providers: map[string]leasing.DynamicCredentialProvider{
+				devCredentialProvider.Type(): devCredentialProvider,
+			},
+			MinTTL:               cfg.Lease.MinTTL,
+			DefaultTTL:           cfg.Lease.DefaultTTL,
+			MaxTTL:               cfg.Lease.MaxTTL,
+			MaxRenewableLifetime: cfg.Lease.MaxRenewableLifetime,
+			AuditTx:              loginAuditTx,
+		})
+
 		keyRotationSvc = service.NewKeyRotationService(keyManager, secretRepo, loginAuditTx)
 		// Explicit at startup, not left to happen lazily on the first
 		// /v1/secrets request — see KeyRotationService.EnsureBootstrapped's
@@ -307,20 +454,25 @@ func main() {
 
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
-		AuthService:         authSvc,
-		UserService:         userSvc,
-		RefreshTokenService: refreshTokenSvc,
-		LogoutService:       logoutSvc,
-		BootstrapService:    bootstrapSvc,
-		RoleService:         roleSvc,
-		RBACService:         rbacSvc,
-		SecretService:       secretSvc,
-		SecretPolicyService: secretPolicySvc,
-		TokenAuth:           tokenSigner,
-		AccessTokens:        accessTokens,
-		AccessTokenAudience: cfg.AccessToken.DefaultAudience,
-		AllowedOrigins:      cfg.Server.AllowedOrigins,
-		Logger:              logger,
+		AuthService:           authSvc,
+		UserService:           userSvc,
+		RefreshTokenService:   refreshTokenSvc,
+		LogoutService:         logoutSvc,
+		BootstrapService:      bootstrapSvc,
+		RoleService:           roleSvc,
+		RBACService:           rbacSvc,
+		AuditService:          auditSvc,
+		AuditTx:               loginAuditTx,
+		SecretService:         secretSvc,
+		SecretPolicyService:   secretPolicySvc,
+		ServiceAccountService: serviceAccountSvc,
+		LeaseService:          leaseSvc,
+		RateLimiter:           apiRateLimiter,
+		TokenAuth:             tokenSigner,
+		AccessTokens:          accessTokens,
+		AccessTokenAudience:   cfg.AccessToken.DefaultAudience,
+		AllowedOrigins:        cfg.Server.AllowedOrigins,
+		Logger:                logger,
 	})
 
 	srv := &http.Server{
@@ -340,6 +492,40 @@ func main() {
 		}
 	}()
 
+	// Best-effort lease-expiry sweep (Sprint 5 Task 2). This is
+	// defense-in-depth tidy-up only, never the authorization boundary
+	// itself — LeaseService.Get/Renew already check entity.Lease.IsExpired
+	// live on every request, so a stalled or entirely-disabled worker
+	// never lets an expired lease remain usable, only lets its Status
+	// column and DB row go stale until the next sweep or next
+	// authorization-time check corrects it (see
+	// LeaseService.ExpireOverdue's own doc comment). Runs only when
+	// leasing is enabled (leaseSvc != nil, i.e. the Secrets Engine is
+	// configured) and CleanupInterval is positive, and stops on the same
+	// shutdown signal every other background goroutine in this file
+	// stops on.
+	if leaseSvc != nil && cfg.Lease.CleanupInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(cfg.Lease.CleanupInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					n, err := leaseSvc.ExpireOverdue(ctx)
+					if err != nil {
+						logger.Error("lease expiry sweep failed", zap.Error(err))
+						continue
+					}
+					if n > 0 {
+						logger.Info("lease expiry sweep expired overdue leases", zap.Int("count", n))
+					}
+				}
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	logger.Info("shutdown signal received, draining connections")
 
@@ -350,4 +536,19 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("shutdown complete")
+}
+
+// windowPolicy translates one RequestCategoryConfig field pair into a
+// *ratelimit.WindowPolicy, or nil when either half is non-positive — the
+// "not configured for this identity type" case, matching
+// ratelimit.CategoryConfig's own "nil field means this dimension doesn't
+// apply" convention. An operator who wants to disable one identity type
+// within a category (without disabling the whole category) sets its
+// limit to 0 and gets exactly that, rather than an accidental
+// always-allow or always-deny policy.
+func windowPolicy(window time.Duration, limit int64) *ratelimit.WindowPolicy {
+	if window <= 0 || limit <= 0 {
+		return nil
+	}
+	return &ratelimit.WindowPolicy{Window: window, Limit: limit}
 }

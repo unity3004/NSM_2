@@ -37,6 +37,7 @@ type Config struct {
 	RefreshToken RefreshTokenConfig `mapstructure:"refresh_token"`
 	RateLimit    RateLimitConfig    `mapstructure:"rate_limit"`
 	Secrets      SecretsConfig      `mapstructure:"secrets"`
+	Lease        LeaseConfig        `mapstructure:"lease"`
 	Log          LogConfig          `mapstructure:"log"`
 }
 
@@ -49,6 +50,16 @@ type ServerConfig struct {
 	// AUTH_SERVER_ALLOWED_ORIGINS env var becomes this slice via the
 	// StringToSliceHookFunc registered in Load — see the comment there.
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	// TrustedProxies (Sprint 4 Task 4) lists the CIDR ranges of reverse
+	// proxies/load balancers this deployment sits behind — see
+	// util.ResolveClientIP's own doc comment for exactly how this is
+	// used. Empty (the default) means "no trusted proxy": every client-IP
+	// resolution ignores X-Forwarded-For/X-Real-IP entirely and uses the
+	// TCP peer address only, which is the only safe default for a
+	// deployment that hasn't explicitly declared what sits in front of
+	// it — trusting either header by default would let any direct client
+	// spoof its own rate-limit/audit identity for free.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // DatabaseConfig describes the connection Postgres pool internal/database
@@ -158,6 +169,41 @@ type RefreshTokenConfig struct {
 	TTL time.Duration `mapstructure:"ttl"`
 }
 
+// LeaseConfig configures service.LeaseService's TTL rules (Sprint 5 Task
+// 2) — the same "requested TTL, clamped to [MinTTL, MaxTTL], defaulting
+// to DefaultTTL when unset" shape the objective's own TTL section
+// describes. There is deliberately no per-request override of MaxTTL
+// anywhere in this codebase — a caller can only ever request a *shorter*
+// effective TTL than the ceiling this config fixes, never a longer one
+// (see LeaseService.effectiveTTL's own doc comment).
+type LeaseConfig struct {
+	MinTTL time.Duration `mapstructure:"min_ttl"`
+	// DefaultTTL is used when a lease-creation request omits ttl
+	// entirely — never left as "0 means unlimited," which the objective's
+	// own "never allow a client to request an arbitrary unlimited TTL"
+	// instruction rules out as a valid interpretation of an absent value
+	// too.
+	DefaultTTL time.Duration `mapstructure:"default_ttl"`
+	MaxTTL     time.Duration `mapstructure:"max_ttl"`
+	// MaxRenewableLifetime bounds a lease's total lifetime across every
+	// renewal combined, measured from its original CreatedAt — not just
+	// each individual renewal's own TTL ceiling (MaxTTL). Without this, a
+	// renewable lease with a short MaxTTL could still be renewed
+	// indefinitely, one MaxTTL-sized window at a time, forever — exactly
+	// the "do not allow indefinite renewal unless explicitly configured"
+	// case the objective calls out by name.
+	MaxRenewableLifetime time.Duration `mapstructure:"max_renewable_lifetime"`
+	// CleanupInterval controls how often the background worker in
+	// cmd/server/main.go sweeps overdue leases via
+	// LeaseService.ExpireOverdue. This is a best-effort, defense-in-depth
+	// tidy-up only — authorization already checks entity.Lease.IsExpired
+	// live on every request, so a slow or stalled cleanup worker never
+	// lets an expired lease remain usable (see LeaseService.Get/Renew's
+	// own doc comments). A non-positive value disables the worker
+	// entirely.
+	CleanupInterval time.Duration `mapstructure:"cleanup_interval"`
+}
+
 // RateLimitConfig configures internal/ratelimit's Redis-backed
 // authentication abuse protection (Milestone 6C). It replaces the
 // Sprint-1 RateLimitConfig{LoginPerMinute}, which nothing in this codebase
@@ -188,6 +234,78 @@ type RateLimitConfig struct {
 	Login      LoginRateLimitConfig     `mapstructure:"login"`
 	Refresh    RefreshRateLimitConfig   `mapstructure:"refresh"`
 	Bootstrap  BootstrapRateLimitConfig `mapstructure:"bootstrap"`
+	// ServiceAccountAuth (Sprint 5 Task 1) guards
+	// POST /service-accounts/{id}/token — the machine-credential
+	// equivalent of Login above, same three-dimension shape (IP, the
+	// service account ID in place of an email, and their pairing).
+	ServiceAccountAuth ServiceAccountAuthRateLimitConfig `mapstructure:"service_account_auth"`
+	// API (Sprint 4 Task 4) configures internal/ratelimit.RedisAPIRateLimiter
+	// — general request throttling for everything Login/Refresh/Bootstrap
+	// above don't cover (secrets, secret-policies, users/roles, audit
+	// search, registration, logout). A distinct mechanism from the
+	// brute-force lockout above by design — see
+	// internal/ratelimit's own package doc comment for the split.
+	API APIRateLimitConfig `mapstructure:"api"`
+}
+
+// APIRateLimitConfig holds one RequestCategoryConfig per rate-limit
+// category — see router.go's categorySecretsRead/etc. constants, which
+// these mapstructure keys must match (cmd/server/main.go is the one
+// place that translates a field here into a
+// ratelimit.APIRateLimiterConfig.Categories map entry keyed by that
+// constant's string value).
+type APIRateLimitConfig struct {
+	SecretsRead  RequestCategoryConfig `mapstructure:"secrets_read"`
+	SecretsWrite RequestCategoryConfig `mapstructure:"secrets_write"`
+	PolicyAdmin  RequestCategoryConfig `mapstructure:"policy_admin"`
+	UserAdmin    RequestCategoryConfig `mapstructure:"user_admin"`
+	AuditRead    RequestCategoryConfig `mapstructure:"audit_read"`
+	AuthRegister RequestCategoryConfig `mapstructure:"auth_register"`
+	AuthLogout   RequestCategoryConfig `mapstructure:"auth_logout"`
+	// ServiceAccountAdmin (Sprint 5 Task 1) covers every
+	// /v1/service-accounts* and /v1/api-keys* admin route — see
+	// router.go's categoryServiceAccountAdmin.
+	ServiceAccountAdmin RequestCategoryConfig `mapstructure:"service_account_admin"`
+	// LeaseCreate/LeaseRead/LeaseRenew/LeaseRevoke (Sprint 5 Task 2) are
+	// deliberately separate categories, not one shared "leases" category
+	// — the objective's own "consider separate limits for lease
+	// creation / renewal / revocation" instruction: creation is the
+	// expensive, abuse-prone operation (it mints a real credential),
+	// renewal only extends bookkeeping, and revocation is a safety
+	// action an operator may need to perform in bulk during an incident
+	// without it competing against normal creation traffic's budget.
+	// LeaseRead (GET list/detail) is the generous, read-only category
+	// every other resource family's own *Read category already
+	// establishes a pattern for (categorySecretsRead, categoryAuditRead).
+	LeaseCreate RequestCategoryConfig `mapstructure:"lease_create"`
+	LeaseRead   RequestCategoryConfig `mapstructure:"lease_read"`
+	LeaseRenew  RequestCategoryConfig `mapstructure:"lease_renew"`
+	LeaseRevoke RequestCategoryConfig `mapstructure:"lease_revoke"`
+}
+
+// RequestCategoryConfig configures one general API rate-limit category —
+// translated into a ratelimit.CategoryConfig by cmd/server/main.go, one
+// WindowPolicy per identity type that's actually meaningful for that
+// category (a zero Window or Limit means "not configured," translated to
+// a nil *ratelimit.WindowPolicy — the same "nil means this dimension
+// doesn't apply" convention OperationPolicy's own fields already follow).
+// Not every field matters for every category: auth_register has no
+// authenticated identity yet, so only IPWindow/IPLimit apply to it in
+// practice; every other category is reached only by an already-
+// authenticated caller (it sits behind requireAuth), so only
+// User*/ServiceAccount* apply to those.
+//
+// FailOpen is this category's own posture when Redis is unreachable —
+// see ratelimit.CategoryConfig's own doc comment for the reasoning behind
+// why this is per-category, never one blanket setting for every category.
+type RequestCategoryConfig struct {
+	UserWindow           time.Duration `mapstructure:"user_window"`
+	UserLimit            int64         `mapstructure:"user_limit"`
+	ServiceAccountWindow time.Duration `mapstructure:"service_account_window"`
+	ServiceAccountLimit  int64         `mapstructure:"service_account_limit"`
+	IPWindow             time.Duration `mapstructure:"ip_window"`
+	IPLimit              int64         `mapstructure:"ip_limit"`
+	FailOpen             bool          `mapstructure:"fail_open"`
 }
 
 // LoginRateLimitConfig holds POST /auth/login's three dimensions — IP,
@@ -201,6 +319,22 @@ type LoginRateLimitConfig struct {
 	PairWindow    time.Duration `mapstructure:"pair_window"`
 	PairLimit     int64         `mapstructure:"pair_limit"`
 	BlockDuration time.Duration `mapstructure:"block_duration"`
+}
+
+// ServiceAccountAuthRateLimitConfig holds POST /service-accounts/{id}/token's
+// three dimensions — IP, the service account ID in place of an email
+// account identifier, and their pairing — mirroring LoginRateLimitConfig's
+// own shape exactly (see ratelimit.OperationServiceAccountAuth's own doc
+// comment for why the identical Dimensions{IP, Account} struct applies
+// unchanged to this operation too).
+type ServiceAccountAuthRateLimitConfig struct {
+	IPWindow             time.Duration `mapstructure:"ip_window"`
+	IPLimit              int64         `mapstructure:"ip_limit"`
+	ServiceAccountWindow time.Duration `mapstructure:"service_account_window"`
+	ServiceAccountLimit  int64         `mapstructure:"service_account_limit"`
+	PairWindow           time.Duration `mapstructure:"pair_window"`
+	PairLimit            int64         `mapstructure:"pair_limit"`
+	BlockDuration        time.Duration `mapstructure:"block_duration"`
 }
 
 // RefreshRateLimitConfig holds POST /auth/refresh's one dimension — IP
@@ -372,6 +506,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.write_timeout", 15*time.Second)
 	v.SetDefault("server.shutdown_timeout", 15*time.Second)
 	v.SetDefault("server.allowed_origins", []string{})
+	v.SetDefault("server.trusted_proxies", []string{})
 
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 5432)
@@ -429,6 +564,127 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rate_limit.bootstrap.ip_window", 1*time.Hour)
 	v.SetDefault("rate_limit.bootstrap.ip_limit", 5)
 	v.SetDefault("rate_limit.bootstrap.block_duration", 1*time.Hour)
+
+	// Sprint 5 Task 1 — machine-credential brute-force protection,
+	// mirroring rate_limit.login's own defaults: a service account's
+	// credential is higher-entropy than a human password (see
+	// util.NewAPIKey), so a somewhat higher account_limit than login's 5
+	// is still conservative — enough headroom for a workload that
+	// legitimately re-authenticates often without diluting the
+	// protection a single leaked-but-wrong-service-account guess gets.
+	v.SetDefault("rate_limit.service_account_auth.ip_window", 15*time.Minute)
+	v.SetDefault("rate_limit.service_account_auth.ip_limit", 30)
+	v.SetDefault("rate_limit.service_account_auth.service_account_window", 15*time.Minute)
+	v.SetDefault("rate_limit.service_account_auth.service_account_limit", 10)
+	v.SetDefault("rate_limit.service_account_auth.pair_window", 15*time.Minute)
+	v.SetDefault("rate_limit.service_account_auth.pair_limit", 10)
+	v.SetDefault("rate_limit.service_account_auth.block_duration", 15*time.Minute)
+
+	// Sprint 4 Task 4 — general API request throttling. Read-heavy,
+	// lower-risk categories (secrets_read, audit_read) default
+	// fail_open: true, so a Redis outage doesn't make read traffic
+	// unusable; write/admin categories default fail_open: false, since
+	// uncontrolled write volume during an outage is a real risk worth
+	// trading availability for. auth_register defaults fail_open: false
+	// too — an unthrottled registration endpoint during a Redis outage is
+	// exactly the mass-account-creation risk this category exists to
+	// close. Service-account limits default higher than user limits
+	// throughout, matching the objective's own "service accounts may
+	// legitimately make many requests... do not simply remove limits"
+	// instruction — still bounded, just a wider budget.
+	v.SetDefault("rate_limit.api.secrets_read.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.secrets_read.user_limit", 100)
+	v.SetDefault("rate_limit.api.secrets_read.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.secrets_read.service_account_limit", 1000)
+	v.SetDefault("rate_limit.api.secrets_read.fail_open", true)
+
+	v.SetDefault("rate_limit.api.secrets_write.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.secrets_write.user_limit", 20)
+	v.SetDefault("rate_limit.api.secrets_write.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.secrets_write.service_account_limit", 100)
+	v.SetDefault("rate_limit.api.secrets_write.fail_open", false)
+
+	v.SetDefault("rate_limit.api.policy_admin.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.policy_admin.user_limit", 30)
+	v.SetDefault("rate_limit.api.policy_admin.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.policy_admin.service_account_limit", 100)
+	v.SetDefault("rate_limit.api.policy_admin.fail_open", false)
+
+	v.SetDefault("rate_limit.api.user_admin.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.user_admin.user_limit", 60)
+	v.SetDefault("rate_limit.api.user_admin.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.user_admin.service_account_limit", 200)
+	v.SetDefault("rate_limit.api.user_admin.fail_open", false)
+
+	v.SetDefault("rate_limit.api.audit_read.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.audit_read.user_limit", 30)
+	v.SetDefault("rate_limit.api.audit_read.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.audit_read.service_account_limit", 100)
+	v.SetDefault("rate_limit.api.audit_read.fail_open", true)
+
+	v.SetDefault("rate_limit.api.auth_register.ip_window", 1*time.Hour)
+	v.SetDefault("rate_limit.api.auth_register.ip_limit", 5)
+	v.SetDefault("rate_limit.api.auth_register.fail_open", false)
+
+	v.SetDefault("rate_limit.api.auth_logout.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.auth_logout.user_limit", 30)
+	v.SetDefault("rate_limit.api.auth_logout.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.auth_logout.service_account_limit", 100)
+	v.SetDefault("rate_limit.api.auth_logout.fail_open", true)
+
+	// service_account_admin (Sprint 5 Task 1): human-administrator-only
+	// traffic in practice (service accounts never call their own admin
+	// API — they authenticate via the token endpoint instead), so this
+	// mirrors user_admin's own limits and posture exactly.
+	v.SetDefault("rate_limit.api.service_account_admin.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.service_account_admin.user_limit", 60)
+	v.SetDefault("rate_limit.api.service_account_admin.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.service_account_admin.service_account_limit", 60)
+	v.SetDefault("rate_limit.api.service_account_admin.fail_open", false)
+
+	// Sprint 5 Task 2 — dynamic-secret lease TTL rules. Defaults chosen to
+	// be short by default (30m) and bounded well below a full day at the
+	// ceiling (1h max) — dynamic credentials are meant to be short-lived
+	// by construction (the objective's own "temporary credentials"
+	// framing), not a slower-to-rotate substitute for a static secret.
+	// MaxRenewableLifetime (24h) bounds total lifetime across every
+	// renewal combined, independent of how many individual MaxTTL-sized
+	// renewals it would otherwise take to reach it.
+	v.SetDefault("lease.min_ttl", 5*time.Minute)
+	v.SetDefault("lease.default_ttl", 30*time.Minute)
+	v.SetDefault("lease.max_ttl", 1*time.Hour)
+	v.SetDefault("lease.max_renewable_lifetime", 24*time.Hour)
+	v.SetDefault("lease.cleanup_interval", 1*time.Minute)
+
+	v.SetDefault("rate_limit.api.lease_create.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_create.user_limit", 10)
+	v.SetDefault("rate_limit.api.lease_create.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_create.service_account_limit", 30)
+	v.SetDefault("rate_limit.api.lease_create.fail_open", false)
+
+	v.SetDefault("rate_limit.api.lease_read.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_read.user_limit", 60)
+	v.SetDefault("rate_limit.api.lease_read.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_read.service_account_limit", 200)
+	v.SetDefault("rate_limit.api.lease_read.fail_open", true)
+
+	v.SetDefault("rate_limit.api.lease_renew.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_renew.user_limit", 20)
+	v.SetDefault("rate_limit.api.lease_renew.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_renew.service_account_limit", 60)
+	v.SetDefault("rate_limit.api.lease_renew.fail_open", false)
+
+	v.SetDefault("rate_limit.api.lease_revoke.user_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_revoke.user_limit", 30)
+	v.SetDefault("rate_limit.api.lease_revoke.service_account_window", time.Minute)
+	v.SetDefault("rate_limit.api.lease_revoke.service_account_limit", 60)
+	// fail_open: true — a Redis outage must not prevent an operator from
+	// revoking a lease during an incident (the exact scenario
+	// categoryServiceAccountAdmin's own write categories deliberately
+	// fail closed for is precisely the opposite risk here: revocation is
+	// a safety action, throttling it away during an outage is the wrong
+	// default).
+	v.SetDefault("rate_limit.api.lease_revoke.fail_open", true)
 
 	v.SetDefault("secrets.dev_master_key_id", "dev-key-1")
 

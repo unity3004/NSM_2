@@ -161,6 +161,12 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		// map to 422, never 500, if it's ever the one that fires" precedent
 		// util.ErrInvalidSecretPath's own case above already establishes.
 		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "A secret policy must have at least one rule.", nil)
+	case errors.Is(err, service.ErrUnknownLeaseType):
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Unknown lease type.", nil)
+	case errors.Is(err, service.ErrLeaseNotActive):
+		writeErrorEnvelope(w, r, http.StatusConflict, dto.CodeLeaseNotActive, "This lease is no longer active.", nil)
+	case errors.Is(err, service.ErrLeaseNotRenewable), errors.Is(err, service.ErrLeaseRenewalExceedsMaxLifetime):
+		writeErrorEnvelope(w, r, http.StatusConflict, dto.CodeLeaseNotRenewable, "This lease cannot be renewed.", nil)
 	case errors.Is(err, util.ErrInvalidPolicyPattern):
 		// Sprint 4 Task 2: a policy rule's path_pattern failed
 		// util.ValidatePolicyPathPattern — normally caught first by

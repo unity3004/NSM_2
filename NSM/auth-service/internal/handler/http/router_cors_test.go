@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/acme/auth-service/internal/ratelimit"
 	"github.com/acme/auth-service/internal/util"
 )
 
@@ -24,6 +25,7 @@ import (
 func newTestCORSRouter(t *testing.T, allowedOrigins []string) http.Handler {
 	t.Helper()
 	return NewRouter(RouterDeps{
+		RateLimiter:    ratelimit.NoopAPIRateLimiter{},
 		TokenAuth:      util.NewJWTSigner("test-signing-key-at-least-32-bytes!", 15*time.Minute),
 		AllowedOrigins: allowedOrigins,
 		Logger:         zap.NewNop(),

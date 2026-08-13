@@ -9,6 +9,9 @@ import { UsersPage } from "@/pages/UsersPage"
 import { RolesPage } from "@/pages/RolesPage"
 import { SecretsPage } from "@/pages/SecretsPage"
 import { SecretPoliciesPage } from "@/pages/SecretPoliciesPage"
+import { ServiceAccountsPage } from "@/pages/ServiceAccountsPage"
+import { LeasesPage } from "@/pages/LeasesPage"
+import { AuditLogsPage } from "@/pages/AuditLogsPage"
 
 export const router = createBrowserRouter([
   { path: "/", element: <Navigate to="/dashboard" replace /> },
@@ -30,6 +33,9 @@ export const router = createBrowserRouter([
           { path: "/roles", element: <RolesPage /> },
           { path: "/secrets", element: <SecretsPage /> },
           { path: "/secret-policies", element: <SecretPoliciesPage /> },
+          { path: "/service-accounts", element: <ServiceAccountsPage /> },
+          { path: "/leases", element: <LeasesPage /> },
+          { path: "/audit-logs", element: <AuditLogsPage /> },
         ],
       },
     ],

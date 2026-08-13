@@ -28,6 +28,8 @@ import {
   Users as UsersIcon,
   ShieldCheck as RolesIcon,
   Lock as PoliciesIcon,
+  Bot as ServiceAccountsIcon,
+  Timer as LeasesIcon,
   ScrollText,
   Settings as SettingsIcon,
   LogOut,
@@ -57,15 +59,30 @@ const navItems = [
   // (router.go) — the same "hide what the real backend would refuse
   // anyway" convention every other gated item here already follows.
   { to: "/secret-policies", label: "Secret policies", icon: PoliciesIcon, permission: "secret_policies:read" },
+  // Sprint 5 Task 1: gated on service_accounts:read, matching GET
+  // /v1/service-accounts' own backend permission requirement exactly
+  // (router.go) — the same "hide what the real backend would refuse
+  // anyway" convention every other gated item here already follows.
+  { to: "/service-accounts", label: "Service accounts", icon: ServiceAccountsIcon, permission: "service_accounts:read" },
+  // Sprint 5 Task 2: unlike every other gated item above, GET /v1/leases
+  // requires no permission at all — every authenticated caller sees their
+  // own leases (ownership-filtered on the backend), so this link is
+  // always shown, the same "null means always visible" convention
+  // Dashboard's own entry already establishes.
+  { to: "/leases", label: "Leases", icon: LeasesIcon, permission: null },
+  // Sprint 4 Task 3: gated on audit:read, matching GET /v1/audit-logs'
+  // own backend permission requirement exactly (router.go) — the same
+  // "hide what the real backend would refuse anyway" convention every
+  // other gated item here already follows. audit:read is an existing
+  // permission (migrations 000022/000023, seeded to Security Engineer
+  // and Auditor), not a new one this task introduced.
+  { to: "/audit-logs", label: "Audit Logs", icon: ScrollText, permission: "audit:read" },
 ] as const
 
 // Shown but disabled — the sidebar's information architecture is honest
 // about what this product will eventually cover without pretending these
 // surfaces are built yet.
-const futureNavItems = [
-  { label: "Audit Logs", icon: ScrollText },
-  { label: "Settings", icon: SettingsIcon },
-]
+const futureNavItems = [{ label: "Settings", icon: SettingsIcon }]
 
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
@@ -73,6 +90,9 @@ const pageTitles: Record<string, string> = {
   "/roles": "Roles",
   "/secrets": "Secrets",
   "/secret-policies": "Secret policies",
+  "/service-accounts": "Service accounts",
+  "/leases": "Leases",
+  "/audit-logs": "Audit Logs",
 }
 
 export function AppLayout() {

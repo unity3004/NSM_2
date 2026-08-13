@@ -51,6 +51,17 @@ const (
 	CodeTokenReuseDetected = "TOKEN_REUSE_DETECTED"
 	CodeRateLimited        = "RATE_LIMITED"
 	CodeInternalError      = "INTERNAL_ERROR"
+	// CodeLeaseNotActive (Sprint 5 Task 2) means a lease is revoked or
+	// expired — collapsed into one code/message the same way
+	// entity.ErrInvalidServiceAccountCredential's own doc comment
+	// explains for machine-auth failures: a client should never be able
+	// to tell "revoked" apart from "expired" through the response alone.
+	CodeLeaseNotActive = "LEASE_NOT_ACTIVE"
+	// CodeLeaseNotRenewable covers both "this lease was never created
+	// with renewable=true" and "this lease already reached its maximum
+	// renewable lifetime" — a client's correct reaction to either is
+	// identical (create a new lease instead), so one code serves both.
+	CodeLeaseNotRenewable = "LEASE_NOT_RENEWABLE"
 )
 
 // PageMeta is the pagination footer on every list response.
