@@ -39,6 +39,31 @@ jwt:
 rate_limit:
   login_per_minute: 5
 
+# postgres_provisioner (Sprint 5 Task 3) is disabled by default — see
+# internal/config.PostgresProvisionerConfig's own doc comment. Uncomment
+# and adapt to enable the "postgres" dynamic-secret lease type. host/
+# port/name here should point at the SAME server as the database section
+# above only in a single-instance dev setup; a real deployment's
+# provisioner connection targets whatever server owns the databases named
+# by its own role_templates, using a dedicated `vault-provisioner`
+# identity — never the `database.*` credentials above. See
+# leasing/postgres.Provider's own doc comment for exactly which
+# privileges that identity needs (CREATEROLE, plus CONNECT/the relevant
+# GRANT-able privileges WITH GRANT OPTION on each templated database).
+#
+# postgres_provisioner:
+#   enabled: true
+#   host: localhost
+#   port: 5432
+#   user: vault_provisioner
+#   name: authdb
+#   sslmode: disable
+#   role_templates:
+#     - name: payment-readonly
+#       database: payment_db
+#       schemas: [public]
+#       privileges: [SELECT]
+
 log:
   level: info
   format: json

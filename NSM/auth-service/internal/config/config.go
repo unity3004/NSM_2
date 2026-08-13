@@ -28,17 +28,18 @@ type Config struct {
 	// bodies. It is itself configuration, not a hardcoded `if isProd`
 	// switch, so a new environment (a "canary" tier, a "loadtest" tier)
 	// never requires a code change.
-	Environment  string             `mapstructure:"environment"`
-	Server       ServerConfig       `mapstructure:"server"`
-	Database     DatabaseConfig     `mapstructure:"database"`
-	Redis        RedisConfig        `mapstructure:"redis"`
-	JWT          JWTConfig          `mapstructure:"jwt"`
-	AccessToken  AccessTokenConfig  `mapstructure:"access_token"`
-	RefreshToken RefreshTokenConfig `mapstructure:"refresh_token"`
-	RateLimit    RateLimitConfig    `mapstructure:"rate_limit"`
-	Secrets      SecretsConfig      `mapstructure:"secrets"`
-	Lease        LeaseConfig        `mapstructure:"lease"`
-	Log          LogConfig          `mapstructure:"log"`
+	Environment         string                    `mapstructure:"environment"`
+	Server              ServerConfig              `mapstructure:"server"`
+	Database            DatabaseConfig            `mapstructure:"database"`
+	Redis               RedisConfig               `mapstructure:"redis"`
+	JWT                 JWTConfig                 `mapstructure:"jwt"`
+	AccessToken         AccessTokenConfig         `mapstructure:"access_token"`
+	RefreshToken        RefreshTokenConfig        `mapstructure:"refresh_token"`
+	RateLimit           RateLimitConfig           `mapstructure:"rate_limit"`
+	Secrets             SecretsConfig             `mapstructure:"secrets"`
+	Lease               LeaseConfig               `mapstructure:"lease"`
+	PostgresProvisioner PostgresProvisionerConfig `mapstructure:"postgres_provisioner"`
+	Log                 LogConfig                 `mapstructure:"log"`
 }
 
 type ServerConfig struct {
@@ -202,6 +203,85 @@ type LeaseConfig struct {
 	// own doc comments). A non-positive value disables the worker
 	// entirely.
 	CleanupInterval time.Duration `mapstructure:"cleanup_interval"`
+}
+
+// PostgresProvisionerConfig configures the dedicated database connection
+// leasing.PostgresCredentialProvider (Sprint 5 Task 3) uses to create and
+// revoke temporary PostgreSQL roles — deliberately never the same
+// connection or credential as Config.Database, the application's own,
+// otherwise-unprivileged connection. A real deployment points this at a
+// separate `vault-provisioner` database identity holding exactly the
+// privileges documented on PostgresCredentialProvider's own doc comment
+// (CREATEROLE plus GRANT authority over the configured role templates'
+// databases/schemas — never SUPERUSER). Enabled defaults to false: the
+// "postgres" lease type is simply never registered with LeaseService
+// until an operator explicitly configures this, the same
+// AUTH_SECRETS_DEV_MASTER_KEY-gated pattern SecretsConfig already
+// establishes for an entire optional subsystem.
+type PostgresProvisionerConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// URL/Host/Port/User/Password/Name/SSLMode mirror DatabaseConfig's own
+	// shape exactly (see that type's own doc comment on the URL-wins
+	// precedence) — a second, independently-configured connection, never
+	// derived from Config.Database.
+	URL             string        `mapstructure:"url"`
+	Host            string        `mapstructure:"host"`
+	Port            int           `mapstructure:"port"`
+	User            string        `mapstructure:"user"`
+	Password        string        `mapstructure:"password"`
+	Name            string        `mapstructure:"name"`
+	SSLMode         string        `mapstructure:"sslmode"`
+	MaxOpenConns    int           `mapstructure:"max_open_conns"`
+	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
+	// RoleTemplates is the entire operator-configured catalog of
+	// selectable dynamic-credential roles — see PostgresRoleTemplate's
+	// own doc comment. A lease-creation request's own "role" field must
+	// name one of these by Name; there is no request field, anywhere,
+	// that lets a caller supply a database, schema, or privilege list
+	// directly. This is what makes "the caller must not be able to
+	// select an arbitrary privileged database role" true by construction
+	// rather than by a runtime check that could have a gap.
+	RoleTemplates []PostgresRoleTemplate `mapstructure:"role_templates"`
+}
+
+// DSN mirrors DatabaseConfig.DSN exactly — see that method's own doc
+// comment.
+func (c PostgresProvisionerConfig) DSN() string {
+	if c.URL != "" {
+		return c.URL
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		c.User, c.Password, c.Host, c.Port, c.Name, c.SSLMode)
+}
+
+// postgresAllowedPrivileges is the entire universe of privilege strings a
+// PostgresRoleTemplate may grant — deliberately an allowlist, not a
+// denylist: SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS (role
+// *attributes*, not GRANT-able privileges at all) can never appear here
+// regardless of what an operator writes in configs/config.yaml, because
+// PostgresCredentialProvider's own CREATE ROLE statement never has a
+// code path that could interpolate one in — see that type's own doc
+// comment. This allowlist exists purely to reject an operator typo (a
+// misspelled privilege Postgres itself would reject anyway, but with a
+// worse error) before it ever reaches a real database.
+var postgresAllowedPrivileges = map[string]bool{
+	"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true,
+	"TRUNCATE": true, "REFERENCES": true, "TRIGGER": true, "USAGE": true, "EXECUTE": true,
+}
+
+// PostgresRoleTemplate is one selectable entry in an operator's
+// role-template catalog — e.g. "payment-readonly" -> database
+// "payment_db", schema "public", privilege "SELECT" only. Name is what a
+// lease-creation request's own "role" field names; Database/Schemas/
+// Privileges are never visible to, or overridable by, the request that
+// selects this template.
+type PostgresRoleTemplate struct {
+	Name       string   `mapstructure:"name"`
+	Database   string   `mapstructure:"database"`
+	Schemas    []string `mapstructure:"schemas"`
+	Privileges []string `mapstructure:"privileges"`
 }
 
 // RateLimitConfig configures internal/ratelimit's Redis-backed
@@ -686,6 +766,19 @@ func setDefaults(v *viper.Viper) {
 	// default).
 	v.SetDefault("rate_limit.api.lease_revoke.fail_open", true)
 
+	// postgres_provisioner (Sprint 5 Task 3): enabled defaults to false —
+	// see PostgresProvisionerConfig's own doc comment. Pool defaults are
+	// deliberately small: this connection only ever runs brief DDL
+	// (CREATE/ALTER/DROP ROLE, a handful of GRANTs), never application
+	// query traffic, so it needs nowhere near Config.Database's own pool
+	// sizing.
+	v.SetDefault("postgres_provisioner.enabled", false)
+	v.SetDefault("postgres_provisioner.sslmode", "disable")
+	v.SetDefault("postgres_provisioner.max_open_conns", 5)
+	v.SetDefault("postgres_provisioner.max_idle_conns", 5)
+	v.SetDefault("postgres_provisioner.conn_max_lifetime", 5*time.Minute)
+	v.SetDefault("postgres_provisioner.conn_max_idle_time", 2*time.Minute)
+
 	v.SetDefault("secrets.dev_master_key_id", "dev-key-1")
 
 	v.SetDefault("log.level", "info")
@@ -786,6 +879,48 @@ func (c Config) Validate() error {
 		}
 		if c.RateLimit.Bootstrap.BlockDuration <= 0 {
 			errs = append(errs, "rate_limit.bootstrap.block_duration must be positive")
+		}
+	}
+
+	// PostgresProvisioner (Sprint 5 Task 3): validated only when enabled —
+	// an operator who never sets postgres_provisioner.enabled never sees
+	// the "postgres" lease type registered at all (cmd/server/main.go),
+	// so there is nothing here to fail closed on. Every check below
+	// exists to catch a misconfiguration before it ever reaches a real
+	// database: an empty/duplicate template name, an unknown privilege
+	// string, or a template naming no database at all.
+	if c.PostgresProvisioner.Enabled {
+		p := c.PostgresProvisioner
+		if p.URL == "" && (p.Host == "" || p.Name == "") {
+			errs = append(errs, "postgres_provisioner.host and postgres_provisioner.name are required when postgres_provisioner.url is not set")
+		}
+		if len(p.RoleTemplates) == 0 {
+			errs = append(errs, "postgres_provisioner.role_templates must contain at least one entry when postgres_provisioner.enabled is true")
+		}
+		seenNames := map[string]bool{}
+		for _, t := range p.RoleTemplates {
+			if t.Name == "" {
+				errs = append(errs, "postgres_provisioner.role_templates: every template must have a non-empty name")
+				continue
+			}
+			if seenNames[t.Name] {
+				errs = append(errs, fmt.Sprintf("postgres_provisioner.role_templates: duplicate template name %q", t.Name))
+			}
+			seenNames[t.Name] = true
+			if t.Database == "" {
+				errs = append(errs, fmt.Sprintf("postgres_provisioner.role_templates[%q]: database must not be empty", t.Name))
+			}
+			if len(t.Privileges) == 0 {
+				errs = append(errs, fmt.Sprintf("postgres_provisioner.role_templates[%q]: privileges must contain at least one entry", t.Name))
+			}
+			for _, priv := range t.Privileges {
+				if !postgresAllowedPrivileges[strings.ToUpper(priv)] {
+					errs = append(errs, fmt.Sprintf("postgres_provisioner.role_templates[%q]: privilege %q is not allowed — must be one of SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, USAGE, EXECUTE", t.Name, priv))
+				}
+			}
+			if len(t.Schemas) == 0 {
+				errs = append(errs, fmt.Sprintf("postgres_provisioner.role_templates[%q]: schemas must contain at least one entry", t.Name))
+			}
 		}
 	}
 

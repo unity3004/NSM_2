@@ -19,6 +19,7 @@ import (
 	"github.com/acme/auth-service/internal/database"
 	httphandler "github.com/acme/auth-service/internal/handler/http"
 	"github.com/acme/auth-service/internal/leasing"
+	leasingpg "github.com/acme/auth-service/internal/leasing/postgres"
 	"github.com/acme/auth-service/internal/logging"
 	"github.com/acme/auth-service/internal/ratelimit"
 	redisclient "github.com/acme/auth-service/internal/redis"
@@ -383,6 +384,43 @@ func main() {
 	// DevKeyProvider) but only ever wired into leaseSvc below, when the
 	// Secrets Engine itself is enabled.
 	devCredentialProvider := leasing.NewDevCredentialProvider()
+	// postgresProvider (Sprint 5 Task 3) is this codebase's first
+	// production DynamicCredentialProvider — see
+	// leasing/postgres.Provider's own doc comment. Constructed only when
+	// an operator has explicitly configured a provisioner connection
+	// (postgres_provisioner.enabled), the identical opt-in posture
+	// SecretsConfig.DevMasterKey and PostgresProvisionerConfig.Enabled's
+	// own doc comment already establish for other optional subsystems —
+	// a deployment that never sets this never has the "postgres" lease
+	// type registered, and POST /v1/leases with type=postgres fails the
+	// same ErrUnknownLeaseType every other unregistered type already
+	// does.
+	var postgresProvider *leasingpg.Provider
+	if cfg.PostgresProvisioner.Enabled {
+		provisionerDB, err := sql.Open("postgres", cfg.PostgresProvisioner.DSN())
+		if err != nil {
+			logger.Error("failed to open the PostgreSQL provisioner connection", zap.Error(err))
+			os.Exit(1)
+		}
+		provisionerDB.SetMaxOpenConns(cfg.PostgresProvisioner.MaxOpenConns)
+		provisionerDB.SetMaxIdleConns(cfg.PostgresProvisioner.MaxIdleConns)
+		provisionerDB.SetConnMaxLifetime(cfg.PostgresProvisioner.ConnMaxLifetime)
+		provisionerDB.SetConnMaxIdleTime(cfg.PostgresProvisioner.ConnMaxIdleTime)
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		pingErr := provisionerDB.PingContext(pingCtx)
+		cancel()
+		if pingErr != nil {
+			logger.Error("failed to reach the PostgreSQL provisioner connection", zap.Error(pingErr))
+			os.Exit(1)
+		}
+		defer provisionerDB.Close()
+
+		templates := make(map[string]leasingpg.RoleTemplate, len(cfg.PostgresProvisioner.RoleTemplates))
+		for _, t := range cfg.PostgresProvisioner.RoleTemplates {
+			templates[t.Name] = leasingpg.RoleTemplate{Database: t.Database, Schemas: t.Schemas, Privileges: t.Privileges}
+		}
+		postgresProvider = leasingpg.NewProvider(provisionerDB, templates, cfg.PostgresProvisioner.Host, cfg.PostgresProvisioner.Port)
+	}
 	if cfg.Secrets.DevMasterKey == "" {
 		logger.Warn("AUTH_SECRETS_DEV_MASTER_KEY not set — Secrets Engine disabled, /v1/secrets routes will not be registered")
 	} else {
@@ -426,13 +464,22 @@ func main() {
 		// task deliberately implements no production credential backend.
 		// A future provider (Postgres, cloud IAM, etc.) adds a second map
 		// entry here, never a change to LeaseService's own code.
+		leaseProviders := map[string]leasing.DynamicCredentialProvider{
+			devCredentialProvider.Type(): devCredentialProvider,
+		}
+		// postgresProvider (Sprint 5 Task 3) is only registered when the
+		// operator actually configured it — see its own construction
+		// above. A lease-creation request naming type=postgres before
+		// that gets the same ErrUnknownLeaseType any other unregistered
+		// type already produces.
+		if postgresProvider != nil {
+			leaseProviders[postgresProvider.Type()] = postgresProvider
+		}
 		leaseSvc = service.NewLeaseService(service.LeaseServiceDeps{
-			Leases:   postgres.NewLeaseRepository(db),
-			RBAC:     rbacSvc,
-			Policies: secretPolicySvc,
-			Providers: map[string]leasing.DynamicCredentialProvider{
-				devCredentialProvider.Type(): devCredentialProvider,
-			},
+			Leases:               postgres.NewLeaseRepository(db),
+			RBAC:                 rbacSvc,
+			Policies:             secretPolicySvc,
+			Providers:            leaseProviders,
 			MinTTL:               cfg.Lease.MinTTL,
 			DefaultTTL:           cfg.Lease.DefaultTTL,
 			MaxTTL:               cfg.Lease.MaxTTL,
