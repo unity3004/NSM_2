@@ -148,6 +148,7 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 		if err := s.deps.Sessions.RevokeSession(ctx, current.UserID, current.SessionID, entity.RevocationReuseDetected); err != nil {
 			logging.FromContext(ctx).Error("failed to revoke session after reuse detection", zap.Error(err))
 		}
+		recordReuseDetectionRevocation(ctx, s.deps.AuditTx, current.UserID, current.SessionID, current.FamilyID, meta.IPAddress)
 		logging.FromContext(ctx).Warn("refresh token reuse detected — session family revoked",
 			zap.String("user_id", current.UserID), zap.String("family_id", current.FamilyID))
 		failureReason = "reuse_detected"
@@ -254,6 +255,7 @@ func (s *RefreshTokenService) recordRefreshAudit(ctx context.Context, current *e
 		ResourceID:   resourceID,
 		Result:       result,
 		IPAddress:    strPtr(meta.IPAddress),
+		RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:     metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
@@ -290,6 +292,7 @@ func (s *RefreshTokenService) recordRefreshFailure(ctx context.Context, dims rat
 		Action:    "auth.refresh_abuse_detected",
 		Result:    entity.AuditResultDenied,
 		IPAddress: strPtr(meta.IPAddress),
+		RequestID: strPtr(util.RequestIDFromContext(ctx)),
 	}
 	if err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
 		return repo.Append(ctx, audit)

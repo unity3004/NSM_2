@@ -68,7 +68,18 @@ const (
 // against User/ServiceAccount/APIKey by ActorType) rather than a foreign
 // key — see auth-service-database-schema.md §"audit_logs". PrevHash /
 // RecordHash form the hash chain that makes the log independently
-// verifiable; Metadata never contains secret values.
+// verifiable; Metadata never contains secret values (see
+// SanitizeAuditMetadata, applied centrally at Append — every call site
+// still hand-picks safe keys, this is defense-in-depth, not the primary
+// control).
+//
+// RequestID (Sprint 4 Task 3) correlates this row with the HTTP request
+// that produced it — the same value middleware.RequestID minted or
+// trusted for that request, echoed in its response header and in every
+// application log line for the same request (see util.RequestIDFromContext's
+// own doc comment on how a value set once, at the edge, reaches both).
+// Nil for events with no originating HTTP request (a background job, a
+// direct service call from a test).
 type AuditLogEntry struct {
 	ID             string
 	OrganizationID *string
@@ -79,6 +90,7 @@ type AuditLogEntry struct {
 	ResourceID     *string
 	Result         AuditResult
 	IPAddress      *string
+	RequestID      *string
 	Metadata       map[string]any
 	PrevHash       *string
 	RecordHash     string

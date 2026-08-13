@@ -517,13 +517,80 @@ func (f *FakeAuditLogRepository) GetByID(_ context.Context, id string) (*entity.
 	return nil, entity.ErrNotFound
 }
 
-func (f *FakeAuditLogRepository) List(_ context.Context, organizationID string, _ repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
+// List applies every AuditLogFilter field the real
+// postgres.auditLogRepository.List does (Sprint 4 Task 3), against the
+// in-memory slice instead of SQL — so internal/service's own unit tests
+// can exercise real filtering/pagination logic without a database. Sort
+// order matches the real repository's ORDER BY occurred_at DESC exactly;
+// ties are broken by append order (stable sort), the fake's own
+// substitute for the real implementation's ", id DESC" tiebreaker (a
+// fake UUID id here carries no ordering information a real BIGSERIAL
+// id does — see Append's own comment on why RecordHash is a UUID rather
+// than a real hash). Cursor pagination is by ID lookup (find the row the
+// cursor names, resume immediately after it in this same ordering) —
+// simpler than replicating a row-value comparison, and sufficient for
+// what a fake needs to prove: that AuditService's own limit+1/trim/
+// encode-cursor logic behaves correctly against *a* correctly-ordered,
+// correctly-filtered page boundary. The real (occurred_at, id) row-value
+// keyset comparison's own correctness is proven separately, against real
+// Postgres, by test/integration/audit_repository_test.go.
+func (f *FakeAuditLogRepository) List(_ context.Context, organizationID string, filter repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	ordered := make([]*entity.AuditLogEntry, len(f.Entries))
+	copy(ordered, f.Entries)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].OccurredAt.After(ordered[j].OccurredAt) })
+
+	startIdx := 0
+	if filter.Cursor != nil && *filter.Cursor != "" {
+		_, cursorID, err := util.DecodeCursor(*filter.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		for i, e := range ordered {
+			if e.ID == cursorID {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
 	var out []*entity.AuditLogEntry
-	for _, e := range f.Entries {
-		if e.OrganizationID != nil && *e.OrganizationID == organizationID {
-			out = append(out, e)
+	for _, e := range ordered[startIdx:] {
+		if e.OrganizationID == nil || *e.OrganizationID != organizationID {
+			continue
+		}
+		if filter.ActorType != nil && e.ActorType != *filter.ActorType {
+			continue
+		}
+		if filter.ActorID != nil && (e.ActorID == nil || *e.ActorID != *filter.ActorID) {
+			continue
+		}
+		if filter.Action != nil && e.Action != *filter.Action {
+			continue
+		}
+		if filter.ResourceType != nil && (e.ResourceType == nil || *e.ResourceType != *filter.ResourceType) {
+			continue
+		}
+		if filter.ResourceID != nil && (e.ResourceID == nil || *e.ResourceID != *filter.ResourceID) {
+			continue
+		}
+		if filter.Result != nil && e.Result != *filter.Result {
+			continue
+		}
+		if filter.RequestID != nil && (e.RequestID == nil || *e.RequestID != *filter.RequestID) {
+			continue
+		}
+		if filter.OccurredAfter != nil && e.OccurredAt.Before(*filter.OccurredAfter) {
+			continue
+		}
+		if filter.OccurredBefore != nil && !e.OccurredAt.Before(*filter.OccurredBefore) {
+			continue
+		}
+		out = append(out, e)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
 		}
 	}
 	return out, nil

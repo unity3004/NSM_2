@@ -9,6 +9,7 @@ import (
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/logging"
 	"github.com/acme/auth-service/internal/repository"
+	"github.com/acme/auth-service/internal/util"
 )
 
 // ErrMissingSessionIdentity is returned when the authenticated identity
@@ -122,6 +123,7 @@ func (s *LogoutService) recordLogoutAudit(ctx context.Context, userID, sessionID
 		ResourceID:   resourceID,
 		Result:       result,
 		IPAddress:    strPtr(meta.IPAddress),
+		RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:     metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {

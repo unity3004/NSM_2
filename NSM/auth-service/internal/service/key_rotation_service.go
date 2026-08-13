@@ -11,6 +11,7 @@ import (
 	"github.com/acme/auth-service/internal/logging"
 	"github.com/acme/auth-service/internal/repository"
 	"github.com/acme/auth-service/internal/secrets"
+	"github.com/acme/auth-service/internal/util"
 )
 
 // KeyRotationService is the operational front door for
@@ -198,6 +199,7 @@ func (s *KeyRotationService) recordKeyAudit(ctx context.Context, action string, 
 			ResourceID:     strPtr(keyID),
 			Result:         result,
 			IPAddress:      strPtr(ipAddress),
+			RequestID:      strPtr(util.RequestIDFromContext(ctx)),
 			Metadata:       metadata,
 		})
 	})

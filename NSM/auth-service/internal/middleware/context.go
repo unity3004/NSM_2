@@ -15,20 +15,20 @@ import (
 
 type ctxKey int
 
-const (
-	requestIDKey ctxKey = iota
-	claimsKey
-)
+const claimsKey ctxKey = iota
 
+// RequestIDFromContext and withRequestID now delegate to util's own
+// storage (Sprint 4 Task 3) — see util.RequestIDFromContext's own doc
+// comment for why the primitive moved to a layer both middleware and
+// internal/service can reach. This function's name and signature are
+// unchanged for every existing caller (response.go's dto.ErrorBody.RequestID,
+// in particular); only where the value actually lives changed.
 func RequestIDFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(requestIDKey).(string); ok {
-		return v
-	}
-	return ""
+	return util.RequestIDFromContext(ctx)
 }
 
 func withRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, requestIDKey, id)
+	return util.WithRequestID(ctx, id)
 }
 
 // ClaimsFromContext returns the verified JWT claims Auth middleware placed

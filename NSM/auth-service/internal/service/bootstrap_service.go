@@ -223,6 +223,7 @@ func (s *BootstrapService) Bootstrap(ctx context.Context, in BootstrapInput) (*e
 			ResourceID:     strPtr("platform"),
 			Result:         entity.AuditResultSuccess,
 			IPAddress:      strPtr(in.IPAddress),
+			RequestID:      strPtr(util.RequestIDFromContext(ctx)),
 			Metadata: map[string]any{
 				"username": username,
 				"email":    email,
@@ -271,6 +272,7 @@ func (s *BootstrapService) recordRejection(ctx context.Context, in BootstrapInpu
 			ResourceID:   strPtr("platform"),
 			Result:       entity.AuditResultDenied,
 			IPAddress:    strPtr(in.IPAddress),
+			RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 			Metadata: map[string]any{
 				"attempted_email": util.NormalizeEmail(in.Email),
 			},

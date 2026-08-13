@@ -214,6 +214,7 @@ func (s *UserService) recordUserAudit(ctx context.Context, action, actorUserID, 
 			ResourceID:   strPtr(targetUserID),
 			Result:       entity.AuditResultSuccess,
 			IPAddress:    strPtr(ipAddress),
+			RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 			Metadata:     metadata,
 		})
 	})
@@ -296,6 +297,7 @@ func (s *UserService) Register(ctx context.Context, in RegisterInput) (*entity.U
 			ResourceID:     &user.ID,
 			Result:         entity.AuditResultSuccess,
 			IPAddress:      strPtr(in.IPAddress),
+			RequestID:      strPtr(util.RequestIDFromContext(ctx)),
 			Metadata: map[string]any{
 				"username": username,
 				"email":    email,

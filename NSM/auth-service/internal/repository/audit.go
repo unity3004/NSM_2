@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/acme/auth-service/internal/entity"
 )
@@ -36,14 +37,26 @@ type AuditLogRepository interface {
 	LatestHash(ctx context.Context, organizationID string) (string, error)
 }
 
+// AuditLogFilter is List's argument. OccurredAfter/OccurredBefore are
+// inclusive-exclusive bounds on occurred_at (After <= occurred_at < Before,
+// see postgresAuditLogRepository.List's own comment on the exact
+// comparison); both nil means no time bound at all. Cursor is an opaque
+// value from a previous response's PageMeta.NextCursor (see
+// util.EncodeCursor/DecodeCursor) — set it to continue from where the
+// last page left off, never constructed by a caller directly. Limit <= 0
+// or > 100 is clamped to a safe default by the implementation, never
+// treated as "no limit": there is no code path through this filter that
+// can request unbounded audit-log retrieval.
 type AuditLogFilter struct {
 	ActorType      *entity.AuditActorType
 	ActorID        *string
+	Action         *string
 	ResourceType   *string
 	ResourceID     *string
 	Result         *entity.AuditResult
-	OccurredAfter  *string
-	OccurredBefore *string
+	RequestID      *string
+	OccurredAfter  *time.Time
+	OccurredBefore *time.Time
 	Cursor         *string
 	Limit          int
 }

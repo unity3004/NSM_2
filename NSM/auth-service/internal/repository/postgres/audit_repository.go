@@ -12,6 +12,7 @@ import (
 
 	"github.com/acme/auth-service/internal/entity"
 	"github.com/acme/auth-service/internal/repository"
+	"github.com/acme/auth-service/internal/util"
 )
 
 type auditLogRepository struct {
@@ -43,10 +44,18 @@ func NewAuditLogRepository(db dbtx) repository.AuditLogRepository {
 // breaks the chain from that point forward in a way a verifier can detect
 // without needing anything beyond the rows themselves.
 //
-// Metadata must never contain a plaintext password or password hash —
-// enforced by convention at every call site (see UserService.Register),
-// not by this method, which has no way to know what a caller's map means.
+// Metadata must never contain a plaintext password, password hash, secret
+// value, or key material. Every call site already hand-picks safe keys by
+// convention (see UserService.Register) — Append also applies
+// entity.SanitizeAuditMetadata itself (Sprint 4 Task 3), the one place
+// every audit write in this codebase passes through regardless of which
+// service produced it, so that discipline holds even for a future call
+// site that forgets it. The redacted metadata, not the original, is what
+// gets hashed into the chain (recordHash below) and what's actually
+// stored — an auditor reading the row back sees exactly what was hashed,
+// never a discrepancy between the two.
 func (r *auditLogRepository) Append(ctx context.Context, e *entity.AuditLogEntry) error {
+	e.Metadata = entity.SanitizeAuditMetadata(e.Metadata)
 	orgKey := ""
 	if e.OrganizationID != nil {
 		orgKey = *e.OrganizationID
@@ -76,14 +85,14 @@ func (r *auditLogRepository) Append(ctx context.Context, e *entity.AuditLogEntry
 	recordHash := computeAuditRecordHash(prevHash, e, metadataJSON)
 
 	const q = `
-		INSERT INTO audit_logs (organization_id, actor_type, actor_id, action, resource_type, resource_id, result, ip_address, metadata, prev_hash, record_hash, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO audit_logs (organization_id, actor_type, actor_id, action, resource_type, resource_id, result, ip_address, request_id, metadata, prev_hash, record_hash, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id`
 	var id int64
 	err = r.db.QueryRowContext(ctx, q,
 		toNullString(e.OrganizationID), e.ActorType, toNullString(e.ActorID), e.Action,
 		toNullString(e.ResourceType), toNullString(e.ResourceID), e.Result, toNullString(e.IPAddress),
-		metadataJSON, sqlNullStringFromHash(prevHash), recordHash, e.OccurredAt,
+		toNullString(e.RequestID), metadataJSON, sqlNullStringFromHash(prevHash), recordHash, e.OccurredAt,
 	).Scan(&id)
 	if err != nil {
 		return translateError(err)
@@ -106,6 +115,33 @@ func (r *auditLogRepository) GetByID(ctx context.Context, id string) (*entity.Au
 	return scanAuditLog(row)
 }
 
+// List applies every AuditLogFilter field as a separate, independently
+// optional, always-parameterized AND clause — never string concatenation
+// of a value, only of $N placeholders naming a value that travels through
+// database/sql's own argument binding (see placeholder's own doc
+// comment). A filter field a caller doesn't set contributes no clause at
+// all, rather than a clause matching "any value" some other way, so a
+// query with zero filters set is simply "every event for this
+// organization," not a query built by conditionally omitting WHERE 1=1
+// tricks.
+//
+// Pagination is keyset (cursor-based), not OFFSET: f.Cursor, when set,
+// decodes to the (occurred_at, id) of the last row a previous page
+// returned (util.DecodeCursor — the same helper/wire-format this
+// codebase already defines for this exact purpose, previously unused),
+// and the next page is everything strictly after that point in the same
+// ORDER BY occurred_at DESC, id DESC ordering this method has always
+// used — expressed as a single row-value comparison
+// "(occurred_at, id) < ($cursor_time, $cursor_id)" Postgres evaluates
+// directly, not two separate inequalities a caller could get wrong by
+// composing OR verses AND incorrectly. This is real cursor pagination:
+// unlike an OFFSET, its cost does not grow with how deep into the result
+// set a caller has paged, and a row inserted or deleted between two page
+// fetches can never cause this method to skip or repeat a row the way
+// OFFSET-based paging can.
+//
+// limit is clamped to (0, 100] the same way it always was — never treated
+// as "no limit," even from a caller that forgets to set it.
 func (r *auditLogRepository) List(ctx context.Context, organizationID string, f repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
 	limit := f.Limit
 	if limit <= 0 || limit > 100 {
@@ -121,6 +157,10 @@ func (r *auditLogRepository) List(ctx context.Context, organizationID string, f 
 		args = append(args, *f.ActorID)
 		query += placeholder(" AND actor_id = $", len(args))
 	}
+	if f.Action != nil {
+		args = append(args, *f.Action)
+		query += placeholder(" AND action = $", len(args))
+	}
 	if f.ResourceType != nil {
 		args = append(args, *f.ResourceType)
 		query += placeholder(" AND resource_type = $", len(args))
@@ -132,6 +172,29 @@ func (r *auditLogRepository) List(ctx context.Context, organizationID string, f 
 	if f.Result != nil {
 		args = append(args, *f.Result)
 		query += placeholder(" AND result = $", len(args))
+	}
+	if f.RequestID != nil {
+		args = append(args, *f.RequestID)
+		query += placeholder(" AND request_id = $", len(args))
+	}
+	if f.OccurredAfter != nil {
+		args = append(args, f.OccurredAfter.UTC())
+		query += placeholder(" AND occurred_at >= $", len(args))
+	}
+	if f.OccurredBefore != nil {
+		args = append(args, f.OccurredBefore.UTC())
+		query += placeholder(" AND occurred_at < $", len(args))
+	}
+	if f.Cursor != nil && *f.Cursor != "" {
+		cursorTime, cursorID, err := util.DecodeCursor(*f.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, cursorTime)
+		timeArgPos := len(args)
+		args = append(args, cursorID)
+		idArgPos := len(args)
+		query += " AND (occurred_at, id) < (" + placeholder("$", timeArgPos) + ", " + placeholder("$", idArgPos) + ")"
 	}
 	args = append(args, limit)
 	query += " ORDER BY occurred_at DESC, id DESC" + placeholder(" LIMIT $", len(args))
@@ -178,15 +241,15 @@ func (r *auditLogRepository) latestHashForOrg(ctx context.Context, organizationI
 }
 
 const auditLogColumns = `id, organization_id, actor_type, actor_id, action, resource_type,
-	resource_id, result, ip_address, metadata, prev_hash, record_hash, occurred_at`
+	resource_id, result, ip_address, request_id, metadata, prev_hash, record_hash, occurred_at`
 
 func scanAuditLog(row interface{ Scan(dest ...any) error }) (*entity.AuditLogEntry, error) {
 	var e entity.AuditLogEntry
 	var id int64
-	var orgID, actorID, resourceType, resourceID, ipAddress, prevHash sql.NullString
+	var orgID, actorID, resourceType, resourceID, ipAddress, requestID, prevHash sql.NullString
 	var metadataJSON []byte
 	err := row.Scan(&id, &orgID, &e.ActorType, &actorID, &e.Action, &resourceType,
-		&resourceID, &e.Result, &ipAddress, &metadataJSON, &prevHash, &e.RecordHash, &e.OccurredAt)
+		&resourceID, &e.Result, &ipAddress, &requestID, &metadataJSON, &prevHash, &e.RecordHash, &e.OccurredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, entity.ErrNotFound
 	}
@@ -199,6 +262,7 @@ func scanAuditLog(row interface{ Scan(dest ...any) error }) (*entity.AuditLogEnt
 	e.ResourceType = nullString(resourceType)
 	e.ResourceID = nullString(resourceID)
 	e.IPAddress = nullString(ipAddress)
+	e.RequestID = nullString(requestID)
 	e.PrevHash = nullString(prevHash)
 	if len(metadataJSON) > 0 {
 		if err := json.Unmarshal(metadataJSON, &e.Metadata); err != nil {

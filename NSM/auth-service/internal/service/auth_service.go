@@ -289,6 +289,7 @@ func (s *AuthService) recordLoginAudit(ctx context.Context, organizationID strin
 		ResourceID:     entry.UserID,
 		Result:         result,
 		IPAddress:      strPtr(meta.IPAddress),
+		RequestID:      strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:       metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
@@ -336,6 +337,7 @@ func (s *AuthService) recordRateLimitAudit(ctx context.Context, operation string
 		Action:    "auth.rate_limited",
 		Result:    entity.AuditResultDenied,
 		IPAddress: strPtr(meta.IPAddress),
+		RequestID: strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:  map[string]any{"operation": operation},
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
@@ -430,6 +432,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string, meta Lo
 	if current.AlreadyRotated() {
 		_ = s.deps.RefreshTokens.RevokeFamily(ctx, current.FamilyID, entity.RevocationReuseDetected)
 		_ = s.deps.Sessions.Revoke(ctx, current.SessionID, entity.RevocationReuseDetected)
+		recordReuseDetectionRevocation(ctx, s.deps.AuditTx, current.UserID, current.SessionID, current.FamilyID, meta.IPAddress)
 		// Warn: this is the strongest signal this service produces that a
 		// credential may have been stolen, not merely misused — worth its
 		// own alert rule in whatever reads these JSON logs, distinct from
@@ -544,6 +547,7 @@ func (s *AuthService) recordRefreshAudit(ctx context.Context, current *entity.Re
 		ResourceID:   resourceID,
 		Result:       result,
 		IPAddress:    strPtr(meta.IPAddress),
+		RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:     metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
@@ -617,6 +621,7 @@ func (s *AuthService) recordLogoutAudit(ctx context.Context, userID, sessionID s
 		ResourceID:   resourceID,
 		Result:       result,
 		IPAddress:    strPtr(meta.IPAddress),
+		RequestID:    strPtr(util.RequestIDFromContext(ctx)),
 		Metadata:     metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
