@@ -5,9 +5,12 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	_ "github.com/lib/pq" // registers the "postgres" driver database/sql needs for connectAsGeneratedRole below
 
 	"github.com/acme/auth-service/internal/leasing"
 	leasingpg "github.com/acme/auth-service/internal/leasing/postgres"
@@ -184,6 +187,96 @@ func TestPostgresProvider_RevokeCredential_DisablesLoginAndIsIdempotent(t *testi
 
 	if err := provider.RevokeCredential(ctx, username); err != nil {
 		t.Errorf("second RevokeCredential() (idempotent call) error = %v, want nil", err)
+	}
+}
+
+// connectAsGeneratedRole opens a real, separate connection authenticating
+// AS the generated role itself (never the provisioner's own db handle) —
+// the one thing setupPostgresProviderTest's other tests never do: they
+// only ever inspect pg_roles/has_table_privilege from the provisioner's
+// side, which proves the grants exist but not that the returned password
+// actually authenticates. "localhost:5432/authdb" matches
+// connectForRegisterTest/setupPostgresProviderTest's own documented
+// convention of always running against that same database.
+func connectAsGeneratedRole(t *testing.T, username, password string) *sql.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("postgres://%s:%s@localhost:5432/authdb?sslmode=disable", username, password)
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open as generated role: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// TestPostgresProvider_GeneratedCredential_AuthenticatesAndRespectsConfiguredPrivilege
+// is the real, end-to-end proof has_table_privilege can only approximate:
+// it connects to PostgreSQL AS the generated role, using exactly the
+// username/password CreateCredential returned to the caller — not the
+// provisioner connection every other test in this file uses — and proves
+// both halves of least privilege from that role's own point of view: the
+// configured operation (SELECT) succeeds, and an unconfigured one
+// (INSERT) is rejected by PostgreSQL itself, not merely absent from a
+// privilege-catalog query.
+func TestPostgresProvider_GeneratedCredential_AuthenticatesAndRespectsConfiguredPrivilege(t *testing.T) {
+	provider, provisionerDB := setupPostgresProviderTest(t)
+	ctx := context.Background()
+
+	cred, err := provider.CreateCredential(ctx, credInput("widgets-readonly", 5*time.Minute))
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	username, password := cred.Secret["username"], cred.Secret["password"]
+	if _, err := provisionerDB.ExecContext(ctx, `INSERT INTO `+pgProviderTestSchema+`.widgets (name) VALUES ('seed')`); err != nil {
+		t.Fatalf("seed widgets row (as provisioner): %v", err)
+	}
+
+	roleDB := connectAsGeneratedRole(t, username, password)
+
+	var currentUser string
+	if err := roleDB.QueryRowContext(ctx, `SELECT current_user`).Scan(&currentUser); err != nil {
+		t.Fatalf("authenticate as generated role %q: %v — the credential CreateCredential returned did not work", username, err)
+	}
+	if currentUser != username {
+		t.Errorf("current_user = %q, want %q", currentUser, username)
+	}
+
+	var name string
+	if err := roleDB.QueryRowContext(ctx, `SELECT name FROM `+pgProviderTestSchema+`.widgets LIMIT 1`).Scan(&name); err != nil {
+		t.Errorf("SELECT as generated role (configured, allowed operation): %v, want it to succeed", err)
+	}
+
+	_, err = roleDB.ExecContext(ctx, `INSERT INTO `+pgProviderTestSchema+`.widgets (name) VALUES ('unauthorized')`)
+	if err == nil {
+		t.Error("INSERT as generated role (unconfigured, unauthorized operation) unexpectedly succeeded, want permission denied")
+	}
+}
+
+// TestPostgresProvider_RevokeCredential_BlocksNewConnectionAttempt goes
+// one step past TestPostgresProvider_RevokeCredential_DisablesLoginAndIsIdempotent's
+// own pg_roles.rolcanlogin check: it proves an actual new connection
+// attempt using the exact, still-otherwise-valid password is rejected by
+// PostgreSQL after revocation — closing the same "the flag is right but
+// does the database actually enforce it" gap the authentication test
+// above closes for CreateCredential.
+func TestPostgresProvider_RevokeCredential_BlocksNewConnectionAttempt(t *testing.T) {
+	provider, _ := setupPostgresProviderTest(t)
+	ctx := context.Background()
+
+	cred, err := provider.CreateCredential(ctx, credInput("widgets-readonly", 5*time.Minute))
+	if err != nil {
+		t.Fatalf("CreateCredential() error = %v", err)
+	}
+	username, password := cred.Secret["username"], cred.Secret["password"]
+
+	if err := provider.RevokeCredential(ctx, username); err != nil {
+		t.Fatalf("RevokeCredential() error = %v", err)
+	}
+
+	roleDB := connectAsGeneratedRole(t, username, password)
+	err = roleDB.PingContext(ctx)
+	if err == nil {
+		t.Error("connected successfully with a revoked credential, want authentication to fail")
 	}
 }
 

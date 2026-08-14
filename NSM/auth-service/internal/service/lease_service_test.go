@@ -133,6 +133,18 @@ func TestLeaseService_Create_Succeeds(t *testing.T) {
 		t.Errorf("Create() credential = %+v, want a real username/password", result.Credential)
 	}
 
+	// result.Lease is exactly what s.deps.Leases.Create persisted — the
+	// leases table has no password column at all (see leasing/postgres's
+	// own doc comment on Credential.Secret vs .Metadata), and this is the
+	// regression test that keeps it that way: Lease.Metadata must never
+	// carry the raw credential, only safe provider context (username,
+	// database, role_template).
+	for k, v := range result.Lease.Metadata {
+		if s, ok := v.(string); ok && s == result.Credential.Secret["password"] {
+			t.Errorf("persisted lease metadata[%q] = the raw generated password, want it never persisted to the lease database", k)
+		}
+	}
+
 	found := false
 	for _, e := range env.audit.Entries {
 		if e.Action == "lease.created" {
