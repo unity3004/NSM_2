@@ -11,11 +11,36 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { useCreateLease } from "@/features/leases/useLeaseMutations"
+import { ApiError } from "@/lib/apiError"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
 import { Timer, TriangleAlert, Copy, Check } from "lucide-react"
 import { toast } from "sonner"
+
+/**
+ * The exact set of dynamic-credential providers compiled into the backend
+ * (leasing.DevCredentialProvider.Type() / leasing/postgres.Provider.Type())
+ * — POST /v1/leases looks its "type" field up in an exact-match provider
+ * registry keyed by these literal strings and returns a 422 "Unknown lease
+ * type" for anything else. This used to be a free-text input, which let a
+ * user type a reasonable-looking value (e.g. "PostgreSQL") that silently
+ * never matched the registry's "postgres" key. There is no discovery
+ * endpoint that lists registered providers, so this list is hand-kept in
+ * sync with the backend's registrations in cmd/server/main.go — add an
+ * entry here whenever a new provider is registered there.
+ */
+const LEASE_TYPES: { value: string; label: string }[] = [
+  { value: "dev-credential", label: "Dev credential (local testing)" },
+  { value: "postgres", label: "PostgreSQL" },
+]
 
 /**
  * Creates a lease and — once, immediately after creation — shows the raw
@@ -49,7 +74,17 @@ export function CreateLeaseDialog() {
     createLease.reset()
   }
 
-  const pathError = touched && path.trim() === "" ? "Path is required." : null
+  const fieldErrors = new Map<string, string>()
+  if (createLease.error instanceof ApiError && createLease.error.details) {
+    for (const detail of createLease.error.details) {
+      fieldErrors.set(detail.field, detail.issue)
+    }
+  }
+
+  const pathError =
+    (touched && path.trim() === "" ? "Path is required." : null) ?? fieldErrors.get("path") ?? null
+  const roleError = fieldErrors.get("role") ?? null
+  const ttlError = fieldErrors.get("ttl") ?? null
   const isValid = path.trim() !== ""
 
   function handleSubmit(event: FormEvent) {
@@ -105,12 +140,18 @@ export function CreateLeaseDialog() {
             <div className="flex flex-col gap-4 py-4">
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="lease-type">Type</Label>
-                <Input
-                  id="lease-type"
-                  value={type}
-                  onChange={(event) => setType(event.target.value)}
-                  placeholder="dev-credential"
-                />
+                <Select value={type} onValueChange={setType}>
+                  <SelectTrigger id="lease-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LEASE_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">
                   The registered dynamic-credential provider to use.
                 </p>
@@ -140,12 +181,18 @@ export function CreateLeaseDialog() {
                   placeholder="payment-readonly"
                   value={role}
                   onChange={(event) => setRole(event.target.value)}
+                  aria-invalid={!!roleError}
                 />
                 <p className="text-xs text-muted-foreground">
                   Selects a pre-approved role template from an operator-configured catalog — e.g.
                   a Postgres provider's least-privilege database role. Required for providers that
                   need one; ignored otherwise.
                 </p>
+                {roleError && (
+                  <p role="alert" className="text-sm text-destructive">
+                    {roleError}
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-col gap-1.5">
@@ -155,11 +202,17 @@ export function CreateLeaseDialog() {
                   placeholder="30m"
                   value={ttl}
                   onChange={(event) => setTtl(event.target.value)}
+                  aria-invalid={!!ttlError}
                 />
                 <p className="text-xs text-muted-foreground">
                   Go duration syntax (e.g. "30m", "1h"). Leave blank to use the server default —
                   requests above the server's configured maximum are clamped down, never rejected.
                 </p>
+                {ttlError && (
+                  <p role="alert" className="text-sm text-destructive">
+                    {ttlError}
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center gap-2">
