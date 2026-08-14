@@ -502,6 +502,17 @@
   animation-delay: var(--kanz-particle-delay, 0s);
 }
 
+/* Dashboard "operational" status dots (DashboardHeader, SecurityStatusPanel)
+ * — a slow, restrained pulse, never a blink/flash. */
+@keyframes kanz-status-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent); }
+  50% { opacity: 0.75; box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 0%, transparent); }
+}
+.kanz-status-pulse {
+  animation: kanz-status-pulse 2.6s ease-in-out infinite;
+  color: inherit;
+}
+
 /* prefers-reduced-motion: every animation above collapses to its resting
  * frame instantly — the hand-picked SVG attribute values in KanzLogo.tsx
  * (a full circle, a 45°-rotated diamond at half opacity, both rings at
@@ -521,7 +532,8 @@
   .kanz-splash-tagline,
   .kanz-lease-dot,
   .kanz-node,
-  .kanz-atmosphere-particle {
+  .kanz-atmosphere-particle,
+  .kanz-status-pulse {
     animation-duration: 0.01ms !important;
     animation-delay: 0s !important;
     animation-iteration-count: 1 !important;

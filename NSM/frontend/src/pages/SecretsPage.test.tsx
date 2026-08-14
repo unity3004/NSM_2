@@ -76,7 +76,7 @@ describe("SecretsPage, authorized to list", () => {
 
     renderWithProviders(<SecretsPage />)
 
-    await screen.findByText("No secrets found.")
+    await screen.findByText("No secrets yet")
     expect(screen.queryByRole("button", { name: /create secret/i })).not.toBeInTheDocument()
   })
 

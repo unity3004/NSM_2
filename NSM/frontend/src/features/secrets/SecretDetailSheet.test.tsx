@@ -1,18 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { MemoryRouter } from "react-router-dom"
 import { SecretDetailSheet } from "@/features/secrets/SecretDetailSheet"
 import { renderWithProviders, signInAs, signOut } from "@/test/testUtils"
 import * as secretsApi from "@/services/secretsApi"
 import * as usersApi from "@/services/usersApi"
+import * as auditApi from "@/services/auditApi"
 import type { UserDetailResponse } from "@/types/user"
 import type { SecretResponse, SecretVersionResponse } from "@/types/secret"
 
 vi.mock("@/services/secretsApi")
 vi.mock("@/services/usersApi")
+vi.mock("@/services/auditApi")
 
 const mockedSecretsApi = vi.mocked(secretsApi)
 const mockedUsersApi = vi.mocked(usersApi)
+const mockedAuditApi = vi.mocked(auditApi)
+
+// SecretDetailSheet's own "Security Activity" section links to /audit
+// (react-router's <Link>, which needs a router context) and reads real
+// audit history for the open secret's path — neither is what any test
+// below is actually about, so this wraps every render the same way and
+// gives that query a harmless, empty default.
+function renderSheet(path: string, onOpenChange: (open: boolean) => void = () => {}) {
+  return renderWithProviders(
+    <MemoryRouter>
+      <SecretDetailSheet path={path} onOpenChange={onOpenChange} />
+    </MemoryRouter>,
+  )
+}
 
 function userWithPermissions(names: string[]): UserDetailResponse {
   return {
@@ -56,6 +73,11 @@ function versionList(currentVersion: number): { data: SecretVersionResponse[] } 
 
 beforeEach(() => {
   signInAs("user-1")
+  mockedAuditApi.listAuditLogs.mockResolvedValue({
+    data: [],
+    page: { next_cursor: null, has_more: false, limit: 5 },
+    summary: { total: 0, success: 0, failure: 0, denied: 0 },
+  })
 })
 
 afterEach(() => {
@@ -71,7 +93,7 @@ describe("SecretDetailSheet, no secrets:read", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList())
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
 
     await screen.findByText(/current version: 2/i)
     expect(screen.queryByRole("button", { name: /reveal secret/i })).not.toBeInTheDocument()
@@ -95,7 +117,7 @@ describe("SecretDetailSheet, with secrets:read", () => {
       updated_at: "2026-01-02T00:00:00Z",
     })
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByText(/current version: 2/i)
 
     // Opening the sheet must never fetch plaintext by itself.
@@ -129,7 +151,7 @@ describe("SecretDetailSheet, with secrets:read", () => {
       updated_at: "2026-01-01T00:00:00Z",
     })
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByText(/current version: 2/i)
 
     const user = userEvent.setup()
@@ -150,7 +172,7 @@ describe("SecretDetailSheet delete", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList())
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByText(/current version: 2/i)
 
     const user = userEvent.setup()
@@ -170,7 +192,7 @@ describe("SecretDetailSheet delete", () => {
     mockedSecretsApi.deleteSecret.mockResolvedValue(undefined)
 
     const onOpenChange = vi.fn()
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={onOpenChange} />)
+    renderSheet("prod/database", onOpenChange)
     await screen.findByText(/current version: 2/i)
 
     const user = userEvent.setup()
@@ -186,7 +208,7 @@ describe("SecretDetailSheet delete", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList())
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByText(/current version: 2/i)
 
     expect(screen.queryByRole("button", { name: /delete secret/i })).not.toBeInTheDocument()
@@ -201,7 +223,7 @@ describe("SecretDetailSheet version history", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList({ version: 3 }))
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(3))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
 
     expect(await screen.findByRole("button", { name: /version 3/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /version 2/i })).toBeInTheDocument()
@@ -214,7 +236,7 @@ describe("SecretDetailSheet version history", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList({ version: 2 }))
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByRole("button", { name: /version 1/i })
 
     expect(screen.queryByRole("button", { name: /rollback to this version/i })).not.toBeInTheDocument()
@@ -225,7 +247,7 @@ describe("SecretDetailSheet version history", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList({ version: 2 }))
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByRole("button", { name: /version 1/i })
 
     // Exactly one Rollback button — for version 1, never for version 2 (current).
@@ -237,7 +259,7 @@ describe("SecretDetailSheet version history", () => {
     mockedSecretsApi.listSecrets.mockResolvedValue(secretList({ version: 2 }))
     mockedSecretsApi.listSecretVersions.mockResolvedValue(versionList(2))
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByRole("button", { name: /version 1/i })
 
     const user = userEvent.setup()
@@ -261,7 +283,7 @@ describe("SecretDetailSheet version history", () => {
       updated_at: "2026-01-03T00:00:00Z",
     })
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByRole("button", { name: /version 1/i })
 
     const user = userEvent.setup()
@@ -283,7 +305,7 @@ describe("SecretDetailSheet version history", () => {
       updated_at: "2026-01-03T00:00:00Z",
     })
 
-    renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+    renderSheet("prod/database")
     await screen.findByRole("button", { name: /version 1/i })
 
     const user = userEvent.setup()

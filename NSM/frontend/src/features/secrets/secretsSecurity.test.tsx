@@ -8,13 +8,16 @@ import { renderWithProviders, signInAs, signOut } from "@/test/testUtils"
 import { useAuthStore } from "@/stores/authStore"
 import * as secretsApi from "@/services/secretsApi"
 import * as usersApi from "@/services/usersApi"
+import * as auditApi from "@/services/auditApi"
 import type { UserDetailResponse } from "@/types/user"
 
 vi.mock("@/services/secretsApi")
 vi.mock("@/services/usersApi")
+vi.mock("@/services/auditApi")
 
 const mockedSecretsApi = vi.mocked(secretsApi)
 const mockedUsersApi = vi.mocked(usersApi)
+const mockedAuditApi = vi.mocked(auditApi)
 
 // A deliberately distinctive marker — if this ever shows up somewhere it
 // shouldn't (localStorage, sessionStorage, a URL, a console call), that's
@@ -55,7 +58,11 @@ async function revealSecretWithMarker() {
     updated_at: "2026-01-01T00:00:00Z",
   })
 
-  renderWithProviders(<SecretDetailSheet path="prod/database" onOpenChange={() => {}} />)
+  renderWithProviders(
+    <MemoryRouter>
+      <SecretDetailSheet path="prod/database" onOpenChange={() => {}} />
+    </MemoryRouter>,
+  )
   await screen.findByText(/current version: 1/i)
 
   const user = userEvent.setup()
@@ -67,6 +74,11 @@ async function revealSecretWithMarker() {
 
 beforeEach(() => {
   signInAs("user-1")
+  mockedAuditApi.listAuditLogs.mockResolvedValue({
+    data: [],
+    page: { next_cursor: null, has_more: false, limit: 5 },
+    summary: { total: 0, success: 0, failure: 0, denied: 0 },
+  })
 })
 
 afterEach(() => {

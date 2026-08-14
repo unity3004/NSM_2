@@ -1,27 +1,34 @@
-import { AuthStatusCard } from "@/features/dashboard/AuthStatusCard"
-import { SecurityOverviewCard } from "@/features/dashboard/SecurityOverviewCard"
-import { SystemStatusCard } from "@/features/dashboard/SystemStatusCard"
-import { ResourceOverviewCard } from "@/features/dashboard/ResourceOverviewCard"
-import { RecentAuditEvents } from "@/features/dashboard/RecentAuditEvents"
+import { DashboardHeader } from "@/features/dashboard/DashboardHeader"
+import { SecurityStatusPanel } from "@/features/dashboard/SecurityStatusPanel"
+import { PrimaryMetrics } from "@/features/dashboard/PrimaryMetrics"
+import { SecurityActivityChart } from "@/features/dashboard/SecurityActivityChart"
+import { QuickActions } from "@/features/dashboard/QuickActions"
+import { SecurityActivityTimeline } from "@/features/dashboard/SecurityActivityTimeline"
 
+/**
+ * KANZ Security Overview — the security control-plane view of this
+ * environment, not a generic account/analytics dashboard. Every section
+ * reads real data from existing endpoints (see each component's own doc
+ * comment for exactly which query); several share the same TanStack
+ * Query cache entry (["health"], the limit:5 audit-logs query) so this
+ * page issues far fewer real requests than its section count suggests.
+ *
+ * `max-w-[1600px] mx-auto` matches the same convention the login page
+ * uses — AppLayout's <main> itself has no width cap (correct for most
+ * pages, e.g. wide tables), so this page caps itself rather than
+ * stretching edge-to-edge on an ultrawide display.
+ */
 export function DashboardPage() {
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">
-          Overview of your account and this session.
-        </p>
+    <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6">
+      <DashboardHeader />
+      <SecurityStatusPanel />
+      <PrimaryMetrics />
+      <div className="flex flex-col gap-4 lg:flex-row">
+        <SecurityActivityChart />
+        <QuickActions />
       </div>
-
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <ResourceOverviewCard />
-        <SystemStatusCard />
-        <AuthStatusCard />
-        <SecurityOverviewCard />
-      </div>
-
-      <RecentAuditEvents />
+      <SecurityActivityTimeline />
     </div>
   )
 }

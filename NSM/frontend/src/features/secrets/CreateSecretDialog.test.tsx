@@ -22,7 +22,7 @@ async function openDialogAndFillValidForm(user: ReturnType<typeof userEvent.setu
 // --- 5. Authorized user can create secret ---
 
 describe("CreateSecretDialog", () => {
-  it("submits path and data, and closes on success", async () => {
+  it("submits path and data, shows a confirmation (never the value), and closes once dismissed", async () => {
     mockedSecretsApi.createSecret.mockResolvedValue({
       path: "prod/database",
       version: 1,
@@ -44,6 +44,35 @@ describe("CreateSecretDialog", () => {
       path: "prod/database",
       data: { username: "app_user" },
     })
+
+    // A polished confirmation replaces the form — the real path, never
+    // the value that was just submitted (SecretResponse, the API's own
+    // create response, has no field that could hold it).
+    expect(await screen.findByText(/secret secured/i)).toBeInTheDocument()
+    expect(screen.getByText("prod/database")).toBeInTheDocument()
+    expect(screen.queryByText("app_user")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /back to secrets/i }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+  })
+
+  it("'View Secret' calls onCreated with the real path and closes the dialog", async () => {
+    mockedSecretsApi.createSecret.mockResolvedValue({
+      path: "prod/database",
+      version: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    })
+    const onCreated = vi.fn()
+
+    const user = userEvent.setup()
+    renderWithProviders(<CreateSecretDialog onCreated={onCreated} />)
+    await openDialogAndFillValidForm(user)
+    await user.click(screen.getByRole("button", { name: /^create secret$/i }))
+
+    await user.click(await screen.findByRole("button", { name: /view secret/i }))
+
+    expect(onCreated).toHaveBeenCalledWith("prod/database")
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
   })
 

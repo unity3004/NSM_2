@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useSearchParams } from "react-router-dom"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -19,7 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { useAuditLogs } from "@/features/audit/useAuditLogs"
+import { useAuditLog, useAuditLogs } from "@/features/audit/useAuditLogs"
 import { AuditEventDetailSheet } from "@/features/audit/AuditEventDetailSheet"
 import type { AuditLogFilters, AuditLogResponse, AuditResult } from "@/types/audit"
 
@@ -60,6 +61,7 @@ export function AuditLogsPage() {
   const [appliedFilters, setAppliedFilters] = useState<AuditLogFilters>({ limit: 25 })
   const [pages, setPages] = useState<AuditLogResponse[][]>([])
   const [selectedEvent, setSelectedEvent] = useState<AuditLogResponse | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const { data, isLoading, isFetching, isError } = useAuditLogs(appliedFilters)
 
@@ -72,6 +74,23 @@ export function AuditLogsPage() {
     setPages((prev) => (appliedFilters.cursor ? [...prev, data.data] : [data.data]))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
+
+  // Deep-link support: /audit?event=<id> (e.g. from the dashboard's
+  // Recent Security Activity rows) opens that one event's detail sheet
+  // directly via GET /v1/audit-logs/{id} — real backend functionality
+  // that already existed but had no client call to it before now — no
+  // dependency on the target event already being present in whatever
+  // filtered page/list this component happens to be showing.
+  const deepLinkedEventId = searchParams.get("event")
+  const deepLinkedEvent = useAuditLog(deepLinkedEventId)
+  useEffect(() => {
+    if (!deepLinkedEvent.data) return
+    setSelectedEvent(deepLinkedEvent.data)
+    const next = new URLSearchParams(searchParams)
+    next.delete("event")
+    setSearchParams(next, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkedEvent.data])
 
   function applyFilters() {
     setPages([])
