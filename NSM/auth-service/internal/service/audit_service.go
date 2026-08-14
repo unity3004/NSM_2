@@ -116,6 +116,30 @@ func (s *AuditService) ListAuditLogs(ctx context.Context, actorUserID, organizat
 	return page, nil
 }
 
+// GetAuditLog is GET /v1/audit-logs/{id}'s own single-event lookup —
+// AuditLogRepository.GetByID already existed (List's own sibling, never
+// previously exposed over HTTP); this is the authorization and
+// organization-isolation wrapper around it that makes exposing it safe.
+// A caller from organization A must never be able to read organization
+// B's event merely by guessing/incrementing a numeric ID — reported as
+// entity.ErrNotFound (never ErrForbidden) so the lookup itself can't be
+// used to confirm a given ID exists at all, the same anti-enumeration
+// posture GetSecret/LeaseService.Get already establish for the identical
+// cross-tenant-ID-guessing shape.
+func (s *AuditService) GetAuditLog(ctx context.Context, actorUserID, organizationID, id string) (*entity.AuditLogEntry, error) {
+	if err := s.authorize(ctx, actorUserID, permAuditRead); err != nil {
+		return nil, err
+	}
+	entry, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if entry.OrganizationID == nil || *entry.OrganizationID != organizationID {
+		return nil, entity.ErrNotFound
+	}
+	return entry, nil
+}
+
 func (s *AuditService) authorize(ctx context.Context, actorUserID, permission string) error {
 	if actorUserID == "" {
 		return entity.ErrForbidden

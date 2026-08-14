@@ -95,6 +95,65 @@ func TestAuditService_ListAuditLogs_AdminCanList(t *testing.T) {
 	}
 }
 
+// --- GetAuditLog: single-event lookup, GET /v1/audit-logs/{id} ---
+
+func TestAuditService_GetAuditLog_AdminCanFetchOwnOrgEvent(t *testing.T) {
+	env := newTestAuditEnv(t)
+	seeded := seedAuditEntry(t, env, "secret.read", entity.AuditResultSuccess, time.Now())
+
+	got, err := env.svc.GetAuditLog(t.Context(), auditAdminID, auditTestOrgID, seeded.ID)
+	if err != nil {
+		t.Fatalf("GetAuditLog() error = %v", err)
+	}
+	if got.Action != "secret.read" {
+		t.Errorf("Action = %q, want %q", got.Action, "secret.read")
+	}
+}
+
+func TestAuditService_GetAuditLog_RequiresPermission(t *testing.T) {
+	env := newTestAuditEnv(t)
+	seeded := seedAuditEntry(t, env, "secret.read", entity.AuditResultSuccess, time.Now())
+
+	_, err := env.svc.GetAuditLog(t.Context(), auditNobodyID, auditTestOrgID, seeded.ID)
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("GetAuditLog() without audit:read, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// TestAuditService_GetAuditLog_CrossOrganizationReportsNotFound is the
+// security-critical property this endpoint exists to enforce: an event
+// ID is a small, sequential, guessable integer (BIGSERIAL) — an admin in
+// one organization must not be able to read a different organization's
+// event merely by incrementing the ID in the URL. Reported as
+// ErrNotFound, never ErrForbidden, so the lookup itself can't be used to
+// confirm a given ID belongs to someone else's organization at all — the
+// same anti-enumeration posture GetAuditLog's own doc comment describes.
+func TestAuditService_GetAuditLog_CrossOrganizationReportsNotFound(t *testing.T) {
+	env := newTestAuditEnv(t)
+	e := &entity.AuditLogEntry{
+		OrganizationID: strPtr("some-other-org"),
+		ActorType:      entity.AuditActorUser,
+		Action:         "secret.read",
+		Result:         entity.AuditResultSuccess,
+	}
+	if err := env.repo.Append(t.Context(), e); err != nil {
+		t.Fatalf("seed Append: %v", err)
+	}
+
+	_, err := env.svc.GetAuditLog(t.Context(), auditAdminID, auditTestOrgID, e.ID)
+	if !errors.Is(err, entity.ErrNotFound) {
+		t.Errorf("GetAuditLog() for another organization's event, error = %v, want entity.ErrNotFound", err)
+	}
+}
+
+func TestAuditService_GetAuditLog_UnknownIDReportsNotFound(t *testing.T) {
+	env := newTestAuditEnv(t)
+	_, err := env.svc.GetAuditLog(t.Context(), auditAdminID, auditTestOrgID, "does-not-exist")
+	if !errors.Is(err, entity.ErrNotFound) {
+		t.Errorf("GetAuditLog() for an unknown ID, error = %v, want entity.ErrNotFound", err)
+	}
+}
+
 // TestAuditService_ListAuditLogs_CountsReflectFullFilteredSetNotOnePage
 // is the Audit Explorer summary cards' own regression test: Counts must
 // total every matching row, not just the one page Entries returns — the

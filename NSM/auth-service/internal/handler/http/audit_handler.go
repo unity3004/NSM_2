@@ -70,6 +70,20 @@ func (h *auditHandler) list(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// get implements GET /v1/audit-logs/{id} — a single event, by its own
+// ID, cross-organization access denied identically to List's own
+// implicit organization scoping (see AuditService.GetAuditLog's own doc
+// comment).
+func (h *auditHandler) get(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	entry, err := h.svc.GetAuditLog(r.Context(), actorUserID(r), organizationIDFromRequest(r), id)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, r, http.StatusOK, dto.AuditLogResponseFromEntity(entry))
+}
+
 // parseAuditLogQuery reads GET /v1/audit-logs' query string into a
 // dto.AuditLogQuery. Malformed values (an unparseable limit, a
 // non-RFC3339 timestamp) are reported per-field via the returned

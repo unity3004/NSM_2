@@ -88,7 +88,7 @@ export function AuditLogsPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audit Logs</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Audit Explorer</h1>
         <p className="text-sm text-muted-foreground">
           A tamper-evident, hash-chained record of security-relevant events. Every filter below is
           applied server-side; results are never fetched unbounded.

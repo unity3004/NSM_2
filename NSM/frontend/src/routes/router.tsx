@@ -35,7 +35,7 @@ export const router = createBrowserRouter([
           { path: "/secret-policies", element: <SecretPoliciesPage /> },
           { path: "/service-accounts", element: <ServiceAccountsPage /> },
           { path: "/leases", element: <LeasesPage /> },
-          { path: "/audit-logs", element: <AuditLogsPage /> },
+          { path: "/audit", element: <AuditLogsPage /> },
         ],
       },
     ],

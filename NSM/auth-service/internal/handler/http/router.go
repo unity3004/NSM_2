@@ -350,6 +350,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.AuditService != nil {
 		audit := &auditHandler{svc: deps.AuditService}
 		mux.Handle("GET /v1/audit-logs", rateLimit(categoryAuditRead, requirePermission("audit:read", audit.list)))
+		mux.Handle("GET /v1/audit-logs/{id}", rateLimit(categoryAuditRead, requirePermission("audit:read", audit.get)))
 	}
 
 	// --- service account administration (Sprint 5 Task 1): gated on the

@@ -76,7 +76,7 @@ const navItems = [
   // other gated item here already follows. audit:read is an existing
   // permission (migrations 000022/000023, seeded to Security Engineer
   // and Auditor), not a new one this task introduced.
-  { to: "/audit-logs", label: "Audit Logs", icon: ScrollText, permission: "audit:read" },
+  { to: "/audit", label: "Audit Explorer", icon: ScrollText, permission: "audit:read" },
 ] as const
 
 // Shown but disabled — the sidebar's information architecture is honest
@@ -92,7 +92,7 @@ const pageTitles: Record<string, string> = {
   "/secret-policies": "Secret policies",
   "/service-accounts": "Service accounts",
   "/leases": "Leases",
-  "/audit-logs": "Audit Logs",
+  "/audit": "Audit Explorer",
 }
 
 export function AppLayout() {
