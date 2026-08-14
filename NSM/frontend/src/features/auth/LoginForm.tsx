@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent } from "react"
+import { AlertTriangle, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -8,6 +9,7 @@ import { ConnectionSecurityIndicator } from "@/components/ConnectionSecurityIndi
 import { useLogin } from "@/features/auth/useLogin"
 import { ApiError } from "@/lib/apiError"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
+import { cn } from "@/lib/utils"
 
 /**
  * Friendly, deliberately non-enumerating copy — preserves the backend's own
@@ -78,10 +80,11 @@ export function LoginForm() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Card className="shadow-lg shadow-black/20">
-        <CardHeader>
+      <Card className="gap-6 border border-border shadow-xl shadow-black/30">
+        <CardHeader className="gap-1.5">
           <CardTitle className="text-xl">Welcome back</CardTitle>
-          <CardDescription>Sign in to access your organization's secrets.</CardDescription>
+          <p className="text-sm font-medium text-kanz-primary">Sign in to KANZ</p>
+          <CardDescription>Secure access to your secrets and identities.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-5">
@@ -93,6 +96,7 @@ export function LoginForm() {
                 type="email"
                 autoComplete="username"
                 autoFocus
+                className="h-10"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 aria-invalid={!!emailError}
@@ -111,6 +115,7 @@ export function LoginForm() {
                 id="password"
                 name="password"
                 autoComplete="current-password"
+                className="h-10"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 aria-invalid={!!passwordError}
@@ -124,7 +129,11 @@ export function LoginForm() {
             </div>
 
             {login.isError && (
-              <p role="alert" className="text-sm text-destructive">
+              <p
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                 {friendlyLoginError(login.error)}
               </p>
             )}
@@ -132,8 +141,12 @@ export function LoginForm() {
             <Button
               type="submit"
               disabled={login.isPending}
-              className="mt-1 h-10 text-sm font-semibold tracking-wide uppercase"
+              className={cn(
+                "mt-1 h-10 text-sm font-semibold tracking-wide uppercase",
+                "hover:bg-primary/90 transition-colors",
+              )}
             >
+              {login.isPending && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
               {login.isPending ? "Authenticating…" : "Sign in"}
             </Button>
           </form>

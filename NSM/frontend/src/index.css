@@ -210,15 +210,35 @@
 }
 
 /* ==========================================================================
-   KANZ sidebar active indicator — a thin cyan bar on the leading edge of
-   the active nav item, layered on top of the cyan text color already set
-   via --sidebar-accent-foreground above. Targets ui/sidebar.tsx's own
-   data-active attribute rather than editing that primitive, so the
-   shadcn component stays untouched and this stays the one place the
-   "premium sidebar" treatment is defined.
+   KANZ sidebar navigation — active state, hover motion, and the Dynamic
+   Leases live indicator. All target ui/sidebar.tsx's own data-active/
+   data-slot attributes rather than editing that primitive, so the shadcn
+   component stays untouched and this stays the one place the "premium
+   sidebar" treatment is defined.
    ========================================================================== */
+[data-slot="sidebar-menu-button"] {
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+[data-slot="sidebar-menu-button"] svg {
+  transition: transform 180ms ease, color 180ms ease;
+}
+/* Hover: background is already handled by the primitive's own
+ * hover:bg-sidebar-accent — this adds the brief's other two hover cues,
+ * a small icon shift and a just-visible border, on top of it. */
+[data-slot="sidebar-menu-button"]:hover:not([data-active="true"]) {
+  border-color: color-mix(in oklab, var(--kanz-primary) 20%, transparent);
+}
+[data-slot="sidebar-menu-button"]:hover svg {
+  transform: translateX(2px);
+}
+
+/* Active: a subtle cyan-tinted background (not the neutral elevated
+ * surface hover uses) plus a thin cyan indicator on the leading edge and
+ * a very restrained glow — "an active security channel," not a bright
+ * block. */
 [data-slot="sidebar-menu-button"][data-active="true"] {
   position: relative;
+  background: color-mix(in oklab, var(--kanz-primary) 10%, transparent);
 }
 [data-slot="sidebar-menu-button"][data-active="true"]::before {
   content: "";
@@ -234,6 +254,20 @@
 /* Collapsed (icon-only) rail has no room for an inset indicator bar. */
 [data-collapsible="icon"] [data-slot="sidebar-menu-button"][data-active="true"]::before {
   display: none;
+}
+
+/* Dynamic Leases live indicator — a small dot, not a fabricated count,
+ * shown only when AppLayout's own real GET /v1/leases call found at
+ * least one lease with status "active" (see the isLeasesActive check in
+ * AppLayout.tsx). Pulses gently; reduced-motion below freezes it solid
+ * rather than hiding it, since the dot's presence/absence is itself real
+ * information. */
+@keyframes kanz-lease-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, var(--kanz-primary) 55%, transparent); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 3px color-mix(in oklab, var(--kanz-primary) 0%, transparent); }
+}
+.kanz-lease-dot {
+  animation: kanz-lease-pulse 2.4s ease-in-out infinite;
 }
 
 /* ==========================================================================
@@ -349,6 +383,125 @@
   animation: kanz-fade-up 0.3s ease-out 1.4s both;
 }
 
+/* ==========================================================================
+   KANZ login experience — background depth, the ambient security-node
+   network (SecurityCoreField.tsx), and cross-panel focus reactivity. All
+   scoped to AuthLayout only via the classes below; nothing here affects
+   any other screen.
+   ========================================================================== */
+.kanz-auth-bg {
+  background-color: var(--kanz-bg);
+  background-image:
+    radial-gradient(55% 50% at 12% 15%, color-mix(in oklab, var(--kanz-primary) 9%, transparent), transparent 70%),
+    radial-gradient(50% 45% at 88% 85%, color-mix(in oklab, var(--kanz-secondary) 7%, transparent), transparent 70%),
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--kanz-border) 35%, transparent) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--kanz-border) 35%, transparent) 0 1px, transparent 1px 64px);
+}
+
+/* Cross-panel reactivity: the left visual brightens very slightly while
+ * any real form input on the page is focused — pure CSS (:has on the
+ * shared ancestor), no state threading between LoginForm and AuthLayout,
+ * so there is zero risk to authentication behavior. */
+.kanz-auth-shell:has(input:focus) .kanz-security-visual {
+  filter: brightness(1.12);
+  transition: filter 300ms ease;
+}
+.kanz-security-visual {
+  transition: filter 300ms ease;
+}
+
+/* ==========================================================================
+   Security Core Field — the four interactive capability nodes
+   (SecurityCoreField.tsx). Structure per node: .kanz-node (the real,
+   focusable <g>) contains .kanz-node-shape / .kanz-node-halo /
+   .kanz-node-label; a sibling .kanz-line--<key> is its connecting line;
+   .kanz-core-response wraps the KanzLogo itself (see AuthLayout.tsx).
+   ========================================================================== */
+@keyframes kanz-node-idle {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.04); }
+}
+.kanz-node {
+  cursor: default;
+  animation: kanz-node-idle 3.6s ease-in-out infinite;
+  transform-origin: center;
+}
+.kanz-node:focus-visible {
+  outline: 2px solid var(--kanz-primary);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.kanz-node-shape {
+  transform-origin: center;
+  transition: transform 200ms ease, filter 200ms ease;
+}
+.kanz-node-label {
+  transition: fill 200ms ease, opacity 200ms ease;
+}
+.kanz-node-halo {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+/* Hovering/focusing a node: it scales up (~1.2x), its glow halo fades in,
+ * and its label brightens from muted to full text color — using :hover
+ * and plain :focus (not just :focus-visible) so touch-tap feedback works
+ * too, per the brief's own "provide an appropriate tap interaction." */
+.kanz-node:hover .kanz-node-shape,
+.kanz-node:focus .kanz-node-shape {
+  transform: scale(1.2);
+  filter: drop-shadow(0 0 6px var(--kanz-primary-glow));
+}
+.kanz-node:hover .kanz-node-halo,
+.kanz-node:focus .kanz-node-halo {
+  opacity: 0.3;
+}
+.kanz-node:hover .kanz-node-label,
+.kanz-node:focus .kanz-node-label {
+  fill: var(--kanz-text);
+}
+
+.kanz-line {
+  transition: opacity 200ms ease, stroke-width 200ms ease;
+}
+@keyframes kanz-line-signal {
+  to { stroke-dashoffset: -20; }
+}
+/* One rule per node: hovering/focusing a node brightens *only its own*
+ * line and sends a slow dash traveling along it — "a signal traveling
+ * through the architecture," not a laser (long, slow-moving dashes at a
+ * still-low peak opacity). :has() on the shared <svg> is what lets a
+ * hover on one <g> reach a sibling <line> without any JS. */
+.kanz-security-field:has(.kanz-node--identity:hover, .kanz-node--identity:focus) .kanz-line--identity,
+.kanz-security-field:has(.kanz-node--secrets:hover, .kanz-node--secrets:focus) .kanz-line--secrets,
+.kanz-security-field:has(.kanz-node--leases:hover, .kanz-node--leases:focus) .kanz-line--leases,
+.kanz-security-field:has(.kanz-node--audit:hover, .kanz-node--audit:focus) .kanz-line--audit {
+  opacity: 0.65;
+  stroke-width: 1.25;
+  animation: kanz-line-signal 1.4s linear infinite;
+}
+
+/* The KANZ core itself responding to ANY node — "this capability is
+ * connected to the core," never a dramatic reaction. .kanz-core-response
+ * wraps just the KanzLogo (not the nodes, not the whole field), so this
+ * stays a restrained, separate effect from each node's own hover state. */
+.kanz-core-response {
+  transition: filter 250ms ease;
+}
+.kanz-security-field:has(.kanz-node:hover, .kanz-node:focus) ~ .kanz-core-response {
+  filter: brightness(1.1) drop-shadow(0 0 10px color-mix(in oklab, var(--kanz-primary-glow) 45%, transparent));
+}
+
+@keyframes kanz-atmosphere-drift {
+  0% { transform: translateY(0); opacity: 0; }
+  15% { opacity: var(--kanz-particle-opacity, 0.35); }
+  85% { opacity: var(--kanz-particle-opacity, 0.35); }
+  100% { transform: translateY(-28px); opacity: 0; }
+}
+.kanz-atmosphere-particle {
+  animation: kanz-atmosphere-drift var(--kanz-particle-duration, 9s) ease-in-out infinite;
+  animation-delay: var(--kanz-particle-delay, 0s);
+}
+
 /* prefers-reduced-motion: every animation above collapses to its resting
  * frame instantly — the hand-picked SVG attribute values in KanzLogo.tsx
  * (a full circle, a 45°-rotated diamond at half opacity, both rings at
@@ -365,9 +518,30 @@
   .kanz-particle-dot-2,
   .kanz-particle-dot-3,
   .kanz-splash-wordmark,
-  .kanz-splash-tagline {
+  .kanz-splash-tagline,
+  .kanz-lease-dot,
+  .kanz-node,
+  .kanz-atmosphere-particle {
     animation-duration: 0.01ms !important;
     animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
+  }
+  /* The hover icon-shift is also motion, not just a color change — freeze
+   * it too so a reduced-motion user gets a purely static hover cue. */
+  [data-slot="sidebar-menu-button"]:hover svg {
+    transform: none !important;
+  }
+  /* Atmosphere particles' resting (pre-animation) state is invisible
+   * (opacity: 0, see kanz-atmosphere-drift's 0%) — frozen at that frame
+   * they'd simply vanish, which reads as broken, not "reduced motion." */
+  .kanz-atmosphere-particle {
+    opacity: var(--kanz-particle-opacity, 0.35) !important;
+  }
+  /* The traveling "signal" dash on a hovered/focused line is continuous
+   * motion and gets disabled — the line still brightens on hover/focus
+   * (a plain property change via the :has() rules above, not an
+   * `animation`), so that feedback is retained exactly as the brief asks. */
+  .kanz-line {
+    animation: none !important;
   }
 }
