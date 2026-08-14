@@ -72,7 +72,7 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --radius: 0.625rem;
+    --radius: 0.5rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: oklch(0.205 0 0);
@@ -83,38 +83,118 @@
     --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* ==========================================================================
+   KANZ design tokens — the single source of truth for the "Obsidian +
+   Cyan" brand palette. Declared on bare :root (not .dark) so they're real,
+   inspectable CSS custom properties usable from anywhere (inline styles,
+   the KanzMark/KanzSplash SVG components, raw CSS below) regardless of
+   theme class — the shadcn semantic variables in .dark above reference
+   these rather than restating literals, and every one of the names below
+   matches the spec's own --kanz-* naming exactly.
+   ========================================================================== */
+:root {
+    --kanz-bg: #05080d;
+    --kanz-surface: #0b1118;
+    --kanz-surface-elevated: #111a24;
+    --kanz-border: #1e2936;
+    --kanz-primary: #22d3ee;
+    --kanz-primary-glow: #67e8f9;
+    --kanz-secondary: #0ea5e9;
+    --kanz-success: #34d399;
+    --kanz-warning: #fbbf24;
+    --kanz-danger: #fb7185;
+    --kanz-text: #f8fafc;
+    --kanz-text-muted: #94a3b8;
+
+    /* Spacing/radius/shadow/transition tokens, additive to the existing
+     * --radius-* scale (@theme inline above already derives sm..4xl from
+     * --radius) and Tailwind's own default spacing scale — not a
+     * replacement for either, just the handful of named values this
+     * brand's shell (glows, elevation, motion) needs repeatedly. */
+    --kanz-space-xs: 0.5rem;
+    --kanz-space-sm: 0.75rem;
+    --kanz-space-md: 1rem;
+    --kanz-space-lg: 1.5rem;
+    --kanz-space-xl: 2rem;
+    --kanz-radius-sm: 0.375rem;
+    --kanz-radius-md: 0.5rem;
+    --kanz-radius-lg: 0.75rem;
+    --kanz-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+    --kanz-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+    --kanz-shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+    --kanz-glow-sm: 0 0 12px -2px color-mix(in oklab, var(--kanz-primary) 55%, transparent);
+    --kanz-glow-md: 0 0 24px -4px color-mix(in oklab, var(--kanz-primary) 60%, transparent);
+    --kanz-transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+    --kanz-transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+    --kanz-transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@theme inline {
+    /* Registers the same tokens as Tailwind v4 theme colors, so ordinary
+     * utility classes (bg-kanz-primary, text-kanz-text-muted,
+     * border-kanz-border, ...) are available throughout the app without
+     * any component reaching for a raw var(--kanz-*) or hex value. */
+    --color-kanz-bg: var(--kanz-bg);
+    --color-kanz-surface: var(--kanz-surface);
+    --color-kanz-surface-elevated: var(--kanz-surface-elevated);
+    --color-kanz-border: var(--kanz-border);
+    --color-kanz-primary: var(--kanz-primary);
+    --color-kanz-primary-glow: var(--kanz-primary-glow);
+    --color-kanz-secondary: var(--kanz-secondary);
+    --color-kanz-success: var(--kanz-success);
+    --color-kanz-warning: var(--kanz-warning);
+    --color-kanz-danger: var(--kanz-danger);
+    --color-kanz-text: var(--kanz-text);
+    --color-kanz-text-muted: var(--kanz-text-muted);
+}
+
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.55 0.19 262);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.55 0.19 262);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.55 0.19 262);
+    /* KANZ "Obsidian + Cyan" dark theme — the app renders with
+     * <html class="dark"> unconditionally (see index.html; there is no
+     * light-mode toggle), so this block is the entire real theme. Values
+     * are drawn directly from the --kanz-* brand tokens below rather than
+     * restated as literals, so the palette has exactly one source of
+     * truth. */
+    --background: var(--kanz-bg);
+    --foreground: var(--kanz-text);
+    --card: var(--kanz-surface);
+    --card-foreground: var(--kanz-text);
+    --popover: var(--kanz-surface-elevated);
+    --popover-foreground: var(--kanz-text);
+    --primary: var(--kanz-primary);
+    --primary-foreground: var(--kanz-bg);
+    --secondary: var(--kanz-surface-elevated);
+    --secondary-foreground: var(--kanz-text);
+    --muted: var(--kanz-surface-elevated);
+    --muted-foreground: var(--kanz-text-muted);
+    --accent: var(--kanz-surface-elevated);
+    --accent-foreground: var(--kanz-text);
+    --destructive: var(--kanz-danger);
+    --border: var(--kanz-border);
+    --input: var(--kanz-border);
+    --ring: var(--kanz-primary);
+    --chart-1: var(--kanz-primary);
+    --chart-2: var(--kanz-secondary);
+    --chart-3: var(--kanz-success);
+    --chart-4: var(--kanz-warning);
+    --chart-5: var(--kanz-danger);
+    /* Sidebar sits one step above the base background (surface, not
+     * elevated-surface) so it reads as a distinct panel without competing
+     * with popovers/dialogs for "most elevated" surface in the hierarchy. */
+    --sidebar: var(--kanz-surface);
+    --sidebar-foreground: var(--kanz-text);
+    --sidebar-primary: var(--kanz-primary);
+    --sidebar-primary-foreground: var(--kanz-bg);
+    --sidebar-accent: var(--kanz-surface-elevated);
+    /* Active/hovered nav item text picks up brand cyan directly — this is
+     * the one deliberate exception to "cyan is an accent, not everywhere":
+     * SidebarMenuButton's own data-active/hover styles (ui/sidebar.tsx)
+     * already key off this variable, so it's how the sidebar's "active
+     * state ... subtle cyan indicator" requirement is met without
+     * touching that primitive component at all. */
+    --sidebar-accent-foreground: var(--kanz-primary);
+    --sidebar-border: var(--kanz-border);
+    --sidebar-ring: var(--kanz-primary);
 }
 
 @layer base {
@@ -127,4 +207,108 @@
   html {
     @apply font-sans;
     }
+}
+
+/* ==========================================================================
+   KANZ sidebar active indicator — a thin cyan bar on the leading edge of
+   the active nav item, layered on top of the cyan text color already set
+   via --sidebar-accent-foreground above. Targets ui/sidebar.tsx's own
+   data-active attribute rather than editing that primitive, so the
+   shadcn component stays untouched and this stays the one place the
+   "premium sidebar" treatment is defined.
+   ========================================================================== */
+[data-slot="sidebar-menu-button"][data-active="true"] {
+  position: relative;
+}
+[data-slot="sidebar-menu-button"][data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: -0.5rem;
+  top: 15%;
+  bottom: 15%;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--kanz-primary);
+  box-shadow: var(--kanz-glow-sm);
+}
+/* Collapsed (icon-only) rail has no room for an inset indicator bar. */
+[data-collapsible="icon"] [data-slot="sidebar-menu-button"][data-active="true"]::before {
+  display: none;
+}
+
+/* ==========================================================================
+   KANZ logo motion — the emblem's continuous idle state (sidebar) and its
+   one-time startup sequence (KanzSplash). Kept centralized here rather
+   than in component-level <style> tags so every animated brand surface
+   shares one definition of "what KANZ motion looks like."
+   ========================================================================== */
+@keyframes kanz-idle-pulse {
+  0%, 100% { opacity: 1; filter: drop-shadow(0 0 4px color-mix(in oklab, var(--kanz-primary-glow) 45%, transparent)); }
+  50% { opacity: 0.85; filter: drop-shadow(0 0 9px color-mix(in oklab, var(--kanz-primary-glow) 75%, transparent)); }
+}
+@keyframes kanz-idle-drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(var(--kanz-drift-x, 0), var(--kanz-drift-y, 0)); }
+}
+@keyframes kanz-fragment-in {
+  0% { opacity: 0; transform: scale(0.4) translate(var(--kanz-from-x), var(--kanz-from-y)); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: scale(1) translate(0, 0); }
+}
+@keyframes kanz-orbit-swirl {
+  0%, 20% { transform: rotate(0deg); }
+  60% { transform: rotate(14deg); }
+  100% { transform: rotate(0deg); }
+}
+@keyframes kanz-core-flash {
+  0%, 55% { opacity: 0.6; filter: drop-shadow(0 0 2px transparent); transform: scale(0.9); }
+  75% { opacity: 1; filter: drop-shadow(0 0 18px var(--kanz-primary-glow)); transform: scale(1.12); }
+  100% { opacity: 1; filter: drop-shadow(0 0 6px color-mix(in oklab, var(--kanz-primary-glow) 60%, transparent)); transform: scale(1); }
+}
+@keyframes kanz-fade-up {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.kanz-mark-idle .kanz-mark-core {
+  animation: kanz-idle-pulse 3.2s ease-in-out infinite;
+  transform-origin: center;
+}
+.kanz-mark-idle .kanz-mark-fragment {
+  animation: kanz-idle-drift 5.5s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.kanz-splash-fragment {
+  animation:
+    kanz-fragment-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) var(--kanz-stagger, 0ms) both,
+    kanz-orbit-swirl 0.65s ease-in-out calc(0.4s + var(--kanz-stagger, 0ms)) both;
+  transform-origin: center;
+}
+.kanz-splash-core {
+  animation: kanz-core-flash 0.45s ease-out 1s both;
+  transform-origin: center;
+}
+.kanz-splash-wordmark {
+  animation: kanz-fade-up 0.3s ease-out 1.15s both;
+}
+.kanz-splash-tagline {
+  animation: kanz-fade-up 0.3s ease-out 1.4s both;
+}
+
+/* prefers-reduced-motion: every animation above collapses to its final,
+ * static frame instantly — the emblem and splash are still fully visible,
+ * just not moving. This is the one place that guarantee is enforced, so
+ * no individual component needs its own reduced-motion branch. */
+@media (prefers-reduced-motion: reduce) {
+  .kanz-mark-idle .kanz-mark-core,
+  .kanz-mark-idle .kanz-mark-fragment,
+  .kanz-splash-fragment,
+  .kanz-splash-core,
+  .kanz-splash-wordmark,
+  .kanz-splash-tagline {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
 }

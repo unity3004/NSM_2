@@ -17,19 +17,19 @@ export function AuthLayout({ children }: { children: ReactNode }) {
 
         <div className="max-w-md">
           <h1 className="text-3xl leading-tight font-semibold tracking-tight text-balance text-foreground">
-            Enterprise Secrets Management Platform
+            Enterprise Secrets & Identity Security Platform
           </h1>
           <p className="mt-4 text-base text-pretty text-muted-foreground">
             Secure your organization's most sensitive credentials, with full
             visibility into who accessed what, and when.
           </p>
           <p className="mt-6 text-xs font-medium tracking-[0.2em] text-primary uppercase">
-            Secure&nbsp;&nbsp;•&nbsp;&nbsp;Audited&nbsp;&nbsp;•&nbsp;&nbsp;Controlled
+            Secure Every Secret.&nbsp;&nbsp;Control Every Identity.
           </p>
         </div>
 
         <p className="text-xs text-muted-foreground">
-          © {new Date().getFullYear()} Vaultis. All rights reserved.
+          © {new Date().getFullYear()} KANZ. All rights reserved.
         </p>
       </div>
 

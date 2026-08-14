@@ -8,7 +8,7 @@ export function RouteLoading() {
       <div
         role="status"
         aria-label="Loading"
-        className="size-6 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-foreground"
+        className="size-6 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary"
       />
     </div>
   )
