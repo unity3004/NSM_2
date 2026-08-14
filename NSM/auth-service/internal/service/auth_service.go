@@ -489,6 +489,19 @@ func (s *AuthService) RefreshToken(ctx context.Context, rawToken string, meta Lo
 		ExpiresAt:     now.Add(s.deps.RefreshTTL),
 	}
 	if err := s.deps.RefreshTokens.Rotate(ctx, current, next); err != nil {
+		if errors.Is(err, entity.ErrNotFound) {
+			// The guarded UPDATE (WHERE revoked_at IS NULL) affected zero
+			// rows: a different concurrent goroutine already rotated or
+			// revoked this exact token between this call's own lookup and
+			// this Rotate attempt — a losing concurrent refresh, not a
+			// resource that was ever missing. See
+			// RefreshTokenService.Refresh's identical fix and its own doc
+			// comment for the full explanation; this is the legacy
+			// refresh flow's copy of the same bug.
+			failureReason = "rotation_lost_race"
+			refreshErr = entity.ErrTokenExpired
+			return nil, refreshErr
+		}
 		failureReason = "rotation_failed"
 		refreshErr = err
 		return nil, refreshErr

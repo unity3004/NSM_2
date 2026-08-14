@@ -458,6 +458,36 @@ func TestRefreshTokenService_Refresh_RotationFailureLeavesConsistentState(t *tes
 	}
 }
 
+// TestRefreshTokenService_Refresh_LostRotationRaceReportsTokenExpiredNotNotFound
+// is the deterministic regression test for a real, previously-flaky bug:
+// postgres.refreshTokenRepository.Rotate's guarded UPDATE (WHERE
+// revoked_at IS NULL) affects zero rows when a concurrent goroutine
+// already rotated the same token first, and translates that into
+// entity.ErrNotFound (see checkRowsAffected's own doc comment). Every
+// other way this function rejects a concurrent loser (reuse detected,
+// already revoked/expired, session invalid) reports entity.ErrTokenExpired,
+// which the HTTP layer maps to 401 — but the raw entity.ErrNotFound from
+// a lost Rotate race used to pass straight through unmapped, producing an
+// inconsistent 404 depending only on which of two racing goroutines the
+// database happened to serialize first. TestE2E_RefreshToken_ConcurrentRefreshCannotDoubleRotate
+// (test/e2e) caught this as an intermittent failure — real concurrent
+// HTTP requests only sometimes land in this exact window. This test
+// forces the window deterministically via FailNextRotate, so it fails
+// every run if the fix regresses, not occasionally.
+func TestRefreshTokenService_Refresh_LostRotationRaceReportsTokenExpiredNotNotFound(t *testing.T) {
+	svc, refreshTokens, sessionRepo, _ := newTestRefreshTokenService(t)
+	raw, _ := seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))
+	refreshTokens.FailNextRotate = entity.ErrNotFound
+
+	_, err := svc.Refresh(t.Context(), raw, LoginMeta{})
+	if !errors.Is(err, entity.ErrTokenExpired) {
+		t.Errorf("Refresh() after losing the Rotate race, error = %v, want entity.ErrTokenExpired (never the bare entity.ErrNotFound a caller would see as an incorrect 404)", err)
+	}
+	if errors.Is(err, entity.ErrNotFound) {
+		t.Error("Refresh() error wraps entity.ErrNotFound — writeServiceError would map this to a 404, not the correct 401")
+	}
+}
+
 func TestRefreshTokenService_Refresh_DatabaseFailureIsSafe(t *testing.T) {
 	svc, refreshTokens, sessionRepo, _ := newTestRefreshTokenService(t)
 	seedRefreshToken(t, sessionRepo, refreshTokens, "user-1", time.Now().Add(time.Hour), time.Now().Add(time.Hour))

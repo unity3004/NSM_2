@@ -492,6 +492,33 @@ func TestRefreshToken_RotatesAndDetectsReuse(t *testing.T) {
 	}
 }
 
+// TestRefreshToken_LostRotationRaceReportsTokenExpiredNotNotFound is the
+// legacy path's own copy of RefreshTokenService's identical regression
+// test — see that test's own doc comment for the full explanation.
+// postgres.refreshTokenRepository.Rotate's guarded UPDATE affects zero
+// rows when a concurrent request already rotated the same token first,
+// translating to entity.ErrNotFound; this function must map that to
+// entity.ErrTokenExpired (401) the same way every other losing-race
+// outcome here already does, never let the bare entity.ErrNotFound (404)
+// through.
+func TestRefreshToken_LostRotationRaceReportsTokenExpiredNotNotFound(t *testing.T) {
+	svc, users, refreshTokens, _, _ := newTestAuthService(t)
+	seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")
+	first, err := svc.Login(t.Context(), "org-1", "marcus.webb@acme.com", "Tr0ub4dor&3xample!", LoginMeta{})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	refreshTokens.FailNextRotate = entity.ErrNotFound
+
+	_, err = svc.RefreshToken(t.Context(), first.RefreshToken, LoginMeta{})
+	if !errors.Is(err, entity.ErrTokenExpired) {
+		t.Errorf("RefreshToken() after losing the Rotate race, error = %v, want entity.ErrTokenExpired", err)
+	}
+	if errors.Is(err, entity.ErrNotFound) {
+		t.Error("RefreshToken() error wraps entity.ErrNotFound — writeServiceError would map this to an incorrect 404")
+	}
+}
+
 // TestRefreshToken_RecordsAuditEventOnSuccess proves AuthService.RefreshToken
 // writes a real audit_logs row — previously-missing behavior, found and
 // fixed the same way AuthService.Logout's own missing audit write was

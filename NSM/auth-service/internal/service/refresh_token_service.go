@@ -197,6 +197,26 @@ func (s *RefreshTokenService) Refresh(ctx context.Context, rawToken string, meta
 	// "WHERE revoked_at IS NULL" so two concurrent Refresh calls for the
 	// same token can never both succeed.
 	if err := s.deps.RefreshTokens.Rotate(ctx, current, next); err != nil {
+		if errors.Is(err, entity.ErrNotFound) {
+			// The guarded UPDATE affected zero rows: current was revoked by
+			// a different goroutine's own Rotate (or by reuse-detection's
+			// RevokeFamily/RevokeSession above) between this call's own
+			// GetByTokenHash read and this Rotate attempt — a losing
+			// concurrent refresh, not a resource that was ever actually
+			// missing. Every other way this function rejects a losing
+			// concurrent request (reuse detected, already revoked/expired,
+			// session invalid) already reports entity.ErrTokenExpired,
+			// which writeServiceError maps to 401; letting the bare
+			// entity.ErrNotFound through here instead produced an
+			// inconsistent 404 for the exact same "you lost the race"
+			// outcome, depending only on which of two concurrent
+			// goroutines' Rotate call the database happened to serialize
+			// first — a real, previously-flaky bug this normalizes away.
+			failureReason = "rotation_lost_race"
+			refreshErr = entity.ErrTokenExpired
+			s.recordRefreshFailure(ctx, rateLimitDims, meta)
+			return nil, refreshErr
+		}
 		failureReason = "rotation_failed"
 		refreshErr = err
 		return nil, refreshErr
