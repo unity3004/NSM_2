@@ -103,7 +103,7 @@ func (in PolicyRuleInput) toEntity() (*entity.SecretPolicyRule, error) {
 	for _, a := range in.Actions {
 		action := entity.PolicyAction(a)
 		switch action {
-		case entity.PolicyActionRead, entity.PolicyActionCreate, entity.PolicyActionUpdate, entity.PolicyActionDelete, entity.PolicyActionList:
+		case entity.PolicyActionRead, entity.PolicyActionCreate, entity.PolicyActionUpdate, entity.PolicyActionDelete, entity.PolicyActionList, entity.PolicyActionRollback:
 		default:
 			return nil, fmt.Errorf("service: unknown policy action %q", a)
 		}

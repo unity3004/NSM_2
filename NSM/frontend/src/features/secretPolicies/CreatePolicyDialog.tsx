@@ -42,7 +42,7 @@ function validatePattern(pattern: string): string | null {
   return null
 }
 
-const ALL_ACTIONS: PolicyAction[] = ["read", "create", "update", "delete", "list"]
+const ALL_ACTIONS: PolicyAction[] = ["read", "create", "update", "delete", "list", "rollback"]
 
 interface DraftRule {
   pathPattern: string

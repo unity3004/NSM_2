@@ -9,7 +9,7 @@ import (
 	"github.com/acme/auth-service/internal/util"
 )
 
-// validPolicyActions is the same five-action vocabulary
+// validPolicyActions is the same six-action vocabulary
 // service.PolicyRuleInput.toEntity enforces (internal/entity's
 // PolicyAction* constants) — duplicated here as a set literal purely so
 // this file can report an unknown action as a field-level 422 without
@@ -17,7 +17,7 @@ import (
 // already needs; the service's own check remains the authoritative one
 // defense-in-depth requires.
 var validPolicyActions = map[string]bool{
-	"read": true, "create": true, "update": true, "delete": true, "list": true,
+	"read": true, "create": true, "update": true, "delete": true, "list": true, "rollback": true,
 }
 
 // PolicyRuleRequest is one rule within a SecretPolicyCreateRequest/
@@ -50,7 +50,7 @@ func (r PolicyRuleRequest) validate(index int, errs *ValidationErrors) {
 	}
 	for _, a := range r.Actions {
 		if !validPolicyActions[a] {
-			errs.Add(fmt.Sprintf("rules[%d].actions", index), fmt.Sprintf("unknown action %q — must be one of read, create, update, delete, list", a))
+			errs.Add(fmt.Sprintf("rules[%d].actions", index), fmt.Sprintf("unknown action %q — must be one of read, create, update, delete, list, rollback", a))
 			break
 		}
 	}

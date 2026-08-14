@@ -2,7 +2,12 @@
 // Task 2's path-scoped secret authorization policies.
 
 export type PolicyEffect = "allow" | "deny"
-export type PolicyAction = "read" | "create" | "update" | "delete" | "list"
+/** "rollback" (Path-Based Secret Authorization phase) is deliberately its
+ * own action, not implied by "update" — a rule granting update on a path
+ * does not, by itself, grant rolling that path back to an old version.
+ * See permSecretsRollback/entity.PolicyActionRollback's own doc comments
+ * on the backend. */
+export type PolicyAction = "read" | "create" | "update" | "delete" | "list" | "rollback"
 
 export interface PolicyRule {
   path_pattern: string

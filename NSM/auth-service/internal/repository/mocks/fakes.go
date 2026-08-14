@@ -1032,7 +1032,10 @@ func (f *FakeSecretPolicyRepository) GrantFullAccessToRole(roleID string) {
 	f.SeedRule(p.ID, &entity.SecretPolicyRule{
 		PathPattern: "*",
 		Effect:      entity.PolicyEffectAllow,
-		Actions:     []entity.PolicyAction{entity.PolicyActionRead, entity.PolicyActionCreate, entity.PolicyActionUpdate, entity.PolicyActionDelete, entity.PolicyActionList},
+		Actions: []entity.PolicyAction{
+			entity.PolicyActionRead, entity.PolicyActionCreate, entity.PolicyActionUpdate,
+			entity.PolicyActionDelete, entity.PolicyActionList, entity.PolicyActionRollback,
+		},
 	})
 	f.AssignRole(p.ID, roleID)
 }

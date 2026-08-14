@@ -571,7 +571,18 @@ func TestSecretPoliciesE2E_BypassAttempts_AllDenied(t *testing.T) {
 		{"trailing slash collapses but stays denied", "/v1/secrets/" + prodPath + "/"},
 		{"case variation on the authorized prefix", "/v1/secrets/DEV/" + suffix + "/db"},
 		{"similar prefix without a path boundary", "/v1/secrets/dev" + suffix + "x/db"},
-		{"duplicate internal slash", "/v1/secrets/dev/" + suffix + "//db"},
+		// A double slash inside the *forbidden* prod path, not the
+		// authorized dev one — net/http.ServeMux's own path cleaning
+		// collapses "//" and 307-redirects to the canonical, single-slash
+		// form (verified directly: Location: the exact clean path) before
+		// this ever reaches routing, so this only ever proves whether the
+		// clean, canonical prodPath is denied — the same resource
+		// "double leading slash"/"trailing slash" above already prove
+		// stays denied through an equivalent collapse. A double slash
+		// placed inside the *authorized* devPath instead would collapse
+		// to devPath itself — a real, legitimately-authorized resource —
+		// and correctly return 200, which is not a bypass to test for.
+		{"duplicate internal slash", "/v1/secrets/prod/" + suffix + "//db"},
 	}
 	for _, a := range attempts {
 		t.Run(a.name, func(t *testing.T) {

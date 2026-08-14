@@ -36,6 +36,13 @@ const (
 	ActionUpdate Action = "update"
 	ActionDelete Action = "delete"
 	ActionList   Action = "list"
+	// ActionRollback (migrations/000033) restricts SecretService.RollbackSecret's
+	// own path-policy check — deliberately distinct from ActionUpdate, so
+	// a policy can grant "update" on a path without that alone implying
+	// "roll this path back to an old version." See
+	// entity.PolicyActionRollback's own doc comment for the full
+	// reasoning.
+	ActionRollback Action = "rollback"
 )
 
 // Effect is a rule's disposition when it matches: does it grant the

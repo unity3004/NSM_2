@@ -1263,3 +1263,108 @@ func TestSecretService_RollbackSecret_NeverLeaksPlaintextOrReusesRawCiphertext(t
 		t.Error("stored ciphertext contains the plaintext marker in the clear")
 	}
 }
+
+// =====================================================================
+// Path-Based Secret Authorization phase: rollback as its own path-policy
+// action, distinct from "update"
+// =====================================================================
+
+// TestSecretService_PathPolicy_UpdateGrantDoesNotImplyRollback is the
+// test that actually proves entity.PolicyActionRollback is enforced, not
+// merely declared: an actor who holds the global secrets:rollback
+// permission (the RBAC-layer gate) AND a path policy granting "update" on
+// dev/* — but that policy's rule does not name "rollback" — must still be
+// denied rollback on dev/*, even though the identical actor can update
+// that same path freely. Narrowing at the path-policy layer must hold
+// even when the broader, global permission is present; the two layers
+// are independent restrictions, not a permission that leaks upward once
+// granted at either one.
+func TestSecretService_PathPolicy_UpdateGrantDoesNotImplyRollback(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-updater-no-rollback"
+	const role = "role-dev-update-only"
+	env.rbac.Grant(actor, permSecretsRead)
+	env.rbac.Grant(actor, permSecretsUpdate)
+	env.rbac.Grant(actor, permSecretsRollback) // global permission present
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-update-only", Name: "dev-update-only"})
+	env.policies.SeedRule("policy-dev-update-only", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow,
+		Actions: []entity.PolicyAction{entity.PolicyActionRead, entity.PolicyActionUpdate}, // no PolicyActionRollback
+	})
+	env.policies.AssignRole("policy-dev-update-only", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	meta, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-scope", Payload: map[string]string{"value": "A"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSecret() error = %v", err)
+	}
+	meta, err = env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-scope", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": "B"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSecret() (v2) error = %v", err)
+	}
+
+	// The path policy grants update — this must succeed.
+	if _, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-scope", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": "C"}, ActorUserID: actor,
+	}); err != nil {
+		t.Errorf("UpdateSecret() by update-only actor = %v, want nil (policy grants update)", err)
+	}
+
+	// The same actor, same path, same global secrets:rollback permission —
+	// but the path policy's rule never named "rollback". Must be denied.
+	if _, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-scope", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: actor,
+	}); !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("RollbackSecret() by update-only (no rollback in path policy) actor = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// TestSecretService_PathPolicy_RollbackActionExplicitlyGranted is the
+// positive counterpart: once a path policy's rule explicitly names
+// PolicyActionRollback, the same shape of actor (global secrets:rollback
+// + path-scoped role) can roll back that path — proving the new action
+// is not just enforced as a denial but genuinely grantable too.
+func TestSecretService_PathPolicy_RollbackActionExplicitlyGranted(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const actor = "user-dev-rollback-granted"
+	const role = "role-dev-rollback"
+	env.rbac.Grant(actor, permSecretsRead)
+	env.rbac.Grant(actor, permSecretsUpdate)
+	env.rbac.Grant(actor, permSecretsRollback)
+	env.policies.SeedPolicy(&entity.SecretPolicy{ID: "policy-dev-rollback", Name: "dev-rollback"})
+	env.policies.SeedRule("policy-dev-rollback", &entity.SecretPolicyRule{
+		PathPattern: "dev/*", Effect: entity.PolicyEffectAllow,
+		Actions: []entity.PolicyAction{entity.PolicyActionRead, entity.PolicyActionUpdate, entity.PolicyActionRollback},
+	})
+	env.policies.AssignRole("policy-dev-rollback", role)
+	if err := env.users.GrantRole(t.Context(), &entity.UserRole{UserID: actor, RoleID: role}); err != nil {
+		t.Fatalf("GrantRole() error = %v", err)
+	}
+
+	meta, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-granted", Payload: map[string]string{"value": "A"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSecret() error = %v", err)
+	}
+	if _, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-granted", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": "B"}, ActorUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("UpdateSecret() (v2) error = %v", err)
+	}
+
+	if _, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "dev/rollback-granted", TargetVersion: 1, ExpectedVersion: 2, ActorUserID: actor,
+	}); err != nil {
+		t.Errorf("RollbackSecret() by actor whose policy explicitly grants rollback = %v, want nil", err)
+	}
+}

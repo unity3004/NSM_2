@@ -1,0 +1,17 @@
+-- Path-Based Secret Authorization phase — rollback becomes its own
+-- path-policy capability, not an alias for "update". Before this, a
+-- caller who held the global secrets:rollback permission (migrations/000032)
+-- and a path policy granting "update" on a path could roll back anything
+-- on that path too, with no way for a policy administrator to grant
+-- update-without-rollback on the same path — the same "narrower
+-- permission must not silently imply a broader one" principle this
+-- schema already applies to secrets:read vs secrets:list (000025)
+-- extended one layer deeper, into path policies themselves.
+--
+-- A separate migration from the one that uses this value, on purpose:
+-- PostgreSQL cannot use a newly added enum value inside the same
+-- transaction that added it (see ALTER TYPE ... ADD VALUE's own
+-- documented restriction), and golang-migrate runs each .up.sql file in
+-- its own transaction — splitting the ADD VALUE from the INSERT that
+-- references it (000034) is required, not stylistic.
+ALTER TYPE secret_policy_action ADD VALUE 'rollback';

@@ -449,9 +449,10 @@ type RollbackSecretInput struct {
 // Gated on secrets:rollback specifically, not secrets:update — see
 // permSecretsRollback's own doc comment for why holding secrets:read (or
 // even secrets:update) must not be enough on its own. The path-policy
-// layer still checks policy.ActionUpdate, the same action an ordinary
-// update requires: a rollback is, in every way that matters to the path
-// policy, a write to this path.
+// layer checks policy.ActionRollback (migrations/000033), its own
+// distinct grantable action, for the identical reason one layer up: a
+// policy granting "update" on a path must not silently also grant
+// rollback on it — see entity.PolicyActionRollback's own doc comment.
 //
 // Concurrency and "don't silently overwrite a change you didn't know
 // about" both work exactly like UpdateSecret: ExpectedVersion is checked
@@ -467,7 +468,7 @@ type RollbackSecretInput struct {
 // failing with entity.ErrVersionConflict the way this codebase's own "no
 // silent overwrites, ever" rule requires.
 func (s *SecretService) RollbackSecret(ctx context.Context, in RollbackSecretInput) (SecretMetadata, error) {
-	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsRollback, in.Path, in.IPAddress, policy.ActionUpdate)
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsRollback, in.Path, in.IPAddress, policy.ActionRollback)
 	if err != nil {
 		return SecretMetadata{}, err
 	}

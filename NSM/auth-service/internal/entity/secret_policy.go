@@ -38,6 +38,14 @@ const (
 	PolicyActionUpdate PolicyAction = "update"
 	PolicyActionDelete PolicyAction = "delete"
 	PolicyActionList   PolicyAction = "list"
+	// PolicyActionRollback (migrations/000033) is deliberately its own
+	// grantable action, not implied by PolicyActionUpdate — see
+	// SecretService's permSecretsRollback doc comment for the identical
+	// principle already applied one layer up, at the RBAC-permission
+	// level: a path policy that grants "update" on a path must not
+	// silently also grant "roll this path back to an old version,"
+	// unless a rule explicitly names PolicyActionRollback too.
+	PolicyActionRollback PolicyAction = "rollback"
 )
 
 // SecretPolicyRule is one secret_policy_rules row plus its joined
