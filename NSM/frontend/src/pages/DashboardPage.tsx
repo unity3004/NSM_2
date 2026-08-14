@@ -1,7 +1,8 @@
 import { AuthStatusCard } from "@/features/dashboard/AuthStatusCard"
 import { SecurityOverviewCard } from "@/features/dashboard/SecurityOverviewCard"
 import { SystemStatusCard } from "@/features/dashboard/SystemStatusCard"
-import { RecentActivityPlaceholder } from "@/features/dashboard/RecentActivityPlaceholder"
+import { ResourceOverviewCard } from "@/features/dashboard/ResourceOverviewCard"
+import { RecentAuditEvents } from "@/features/dashboard/RecentAuditEvents"
 
 export function DashboardPage() {
   return (
@@ -14,12 +15,13 @@ export function DashboardPage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <ResourceOverviewCard />
+        <SystemStatusCard />
         <AuthStatusCard />
         <SecurityOverviewCard />
-        <SystemStatusCard />
       </div>
 
-      <RecentActivityPlaceholder />
+      <RecentAuditEvents />
     </div>
   )
 }

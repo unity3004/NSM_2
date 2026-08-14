@@ -160,8 +160,11 @@ export function AppLayout() {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel className="truncate text-xs font-normal text-muted-foreground">
-                  {user?.email ?? "…"}
+                <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
+                  <span className="truncate text-sm font-medium text-foreground">
+                    {user?.username ?? "…"}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground">{user?.email ?? "…"}</span>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
