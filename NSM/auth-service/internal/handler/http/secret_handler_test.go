@@ -359,3 +359,110 @@ func TestSecretsHandler_ErrorResponses_NeverLeakInternalDetail(t *testing.T) {
 		}
 	}
 }
+
+// =====================================================================
+// Secret Versioning phase: rollback and ?versions=true
+// =====================================================================
+
+// --- Rollback requires If-Match, exactly like update ---
+
+func TestSecretsHandler_Rollback_MissingIfMatch(t *testing.T) {
+	h := newTestSecretHandler(t)
+	req := jsonRequest(http.MethodPost, "/v1/secrets/rollback", `{"path": "prod/db", "version": 1}`)
+	rec := httptest.NewRecorder()
+
+	h.rollback(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+}
+
+func TestSecretsHandler_Rollback_MalformedIfMatch(t *testing.T) {
+	for _, val := range []string{"abc", "0", "-1"} {
+		t.Run(val, func(t *testing.T) {
+			h := newTestSecretHandler(t)
+			req := jsonRequest(http.MethodPost, "/v1/secrets/rollback", `{"path": "prod/db", "version": 1}`)
+			req.Header.Set("If-Match", val)
+			rec := httptest.NewRecorder()
+
+			h.rollback(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Errorf("If-Match=%q: status = %d, want %d", val, rec.Code, http.StatusUnprocessableEntity)
+			}
+		})
+	}
+}
+
+func TestSecretsHandler_Rollback_MalformedJSON(t *testing.T) {
+	h := newTestSecretHandler(t)
+	req := jsonRequest(http.MethodPost, "/v1/secrets/rollback", `{`)
+	req.Header.Set("If-Match", `"3"`)
+	rec := httptest.NewRecorder()
+
+	h.rollback(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestSecretsHandler_Rollback_InvalidVersion(t *testing.T) {
+	for _, body := range []string{
+		`{"path": "prod/db", "version": 0}`,
+		`{"path": "prod/db", "version": -1}`,
+		`{"path": "prod/db"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			h := newTestSecretHandler(t)
+			req := jsonRequest(http.MethodPost, "/v1/secrets/rollback", body)
+			req.Header.Set("If-Match", `"3"`)
+			rec := httptest.NewRecorder()
+
+			h.rollback(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Errorf("body=%q: status = %d, want %d; body = %s", body, rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+			}
+		})
+	}
+}
+
+// --- Defense-in-depth: no authenticated identity -> 403 (see this
+// file's own doc comment on newTestSecretHandler for why this package
+// tests that path specifically, and defers full authorized-flow coverage
+// to test/e2e) ---
+
+func TestSecretsHandler_Rollback_NoClaims_Returns403(t *testing.T) {
+	h := newTestSecretHandler(t)
+	req := jsonRequest(http.MethodPost, "/v1/secrets/rollback", `{"path": "prod/db", "version": 1}`)
+	req.Header.Set("If-Match", `"3"`)
+	rec := httptest.NewRecorder()
+
+	h.rollback(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if code := decodeErrorCode(t, rec); code != "FORBIDDEN" {
+		t.Errorf("error code = %q, want FORBIDDEN", code)
+	}
+}
+
+// --- ?versions=true shares secretHandler.get's route; same defense-in-depth
+// 403 without claims applies ---
+
+func TestSecretsHandler_ListVersions_NoClaims_Returns403(t *testing.T) {
+	h := newTestSecretHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/secrets/prod/db?versions=true", nil)
+	req.Header.Set("X-Organization-Id", "org-1")
+	req.SetPathValue("path", "prod/db")
+	rec := httptest.NewRecorder()
+
+	h.get(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}

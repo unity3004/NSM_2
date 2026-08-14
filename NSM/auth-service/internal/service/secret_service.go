@@ -27,6 +27,12 @@ const (
 	permSecretsUpdate = "secrets:update"
 	permSecretsDelete = "secrets:delete"
 	permSecretsList   = "secrets:list"
+	// permSecretsRollback (migrations/000032) is deliberately its own
+	// capability, not an alias for permSecretsUpdate — "read a secret's
+	// history" (permSecretsRead, ListVersions below) must not imply "may
+	// make an old value current again." See RollbackSecret's own doc
+	// comment.
+	permSecretsRollback = "secrets:rollback"
 )
 
 // ErrEmptyPayload means Create/UpdateSecret was called with no key/value
@@ -256,9 +262,76 @@ func (s *SecretService) GetSecret(ctx context.Context, in GetSecretInput) (Secre
 		return SecretValue{}, fmt.Errorf("service: unmarshaling decrypted secret payload: %w", err)
 	}
 
-	s.recordSecretAudit(ctx, "secret.read", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
+	// A caller who named a specific version (in.Version != nil) explicitly
+	// asked to look at history, not "the" value — distinct enough from an
+	// ordinary current-version read to get its own audit action
+	// (secret.version_accessed) rather than folding into secret.read,
+	// which every current-version GetSecret call before this phase already
+	// produced and keeps producing unchanged.
+	action := "secret.read"
+	if in.Version != nil {
+		action = "secret.version_accessed"
+	}
+	s.recordSecretAudit(ctx, action, in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path, "version": version.Version})
 	return SecretValue{Metadata: secretMetadataFromEntity(secret), Version: version.Version, Payload: payload}, nil
+}
+
+// SecretVersionMetadata is one row of ListVersions' result — deliberately
+// as safe to return as SecretMetadata (no ciphertext, nonce, or key
+// field), plus Current, which SecretMetadata itself has no reason to
+// carry (it already describes exactly one version implicitly: whichever
+// GetSecret/CreateSecret/UpdateSecret happened to fetch or create).
+type SecretVersionMetadata struct {
+	Version   int
+	CreatedBy string
+	CreatedAt time.Time
+	Current   bool
+}
+
+// ListVersionsInput is ListVersions' argument.
+type ListVersionsInput struct {
+	OrganizationID        string
+	Path                  string
+	ActorUserID           string
+	ActorIsServiceAccount bool
+	IPAddress             string
+}
+
+// ListVersions returns metadata for every non-destroyed version of the
+// secret at Path, newest first — never a payload, ciphertext, nonce, or
+// key ID (see SecretVersionMetadata's own doc comment). Gated on
+// secrets:read + the path's own read policy, the identical authorization
+// GetSecret already requires: viewing what versions exist is a read of
+// this secret, the same way viewing its current value is, and holding
+// permission to read a value implies permission to see the version
+// history that value is one entry of. This is deliberately not gated by
+// secrets:list — that permission controls seeing which *paths* exist
+// across the whole organization (SecretService.ListSecrets), a different
+// capability from seeing one already-known path's own history.
+func (s *SecretService) ListVersions(ctx context.Context, in ListVersionsInput) ([]SecretVersionMetadata, error) {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsRead, in.Path, in.IPAddress, policy.ActionRead)
+	if err != nil {
+		return nil, err
+	}
+
+	secret, err := s.repo.GetByPath(ctx, in.OrganizationID, path)
+	if err != nil {
+		return nil, err
+	}
+	versions, err := s.repo.ListVersions(ctx, secret.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]SecretVersionMetadata, 0, len(versions))
+	for _, v := range versions {
+		out = append(out, SecretVersionMetadata{
+			Version: v.Version, CreatedBy: v.CreatedBy, CreatedAt: v.CreatedAt,
+			Current: v.Version == secret.CurrentVersion,
+		})
+	}
+	return out, nil
 }
 
 // UpdateSecretInput is UpdateSecret's argument. ExpectedVersion is
@@ -343,6 +416,121 @@ func (s *SecretService) UpdateSecret(ctx context.Context, in UpdateSecretInput) 
 
 	s.recordSecretAudit(ctx, "secret.updated", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
 		map[string]any{"path": secret.Path, "version": version.Version})
+	return secretMetadataFromEntity(secret), nil
+}
+
+// RollbackSecretInput is RollbackSecret's argument. TargetVersion is the
+// historical version whose value becomes the new current one — never the
+// version number the result is stored as (see RollbackSecret's own doc
+// comment: that is always ExpectedVersion + 1, decided the same way
+// UpdateSecret decides it, not supplied by the caller). ExpectedVersion is
+// the version the caller believes is current right now — required, for
+// the identical reason UpdateSecretInput.ExpectedVersion is required, not
+// optional: see that field's own doc comment.
+type RollbackSecretInput struct {
+	OrganizationID        string
+	Path                  string
+	TargetVersion         int
+	ExpectedVersion       int
+	ActorUserID           string
+	ActorIsServiceAccount bool
+	IPAddress             string
+}
+
+// RollbackSecret creates a new version whose plaintext equals
+// TargetVersion's — it never deletes, restores, or renumbers anything.
+// Version 1 = A, 2 = B, 3 = C, rollback to 1 produces version 4 = A;
+// versions 1, 2, and 3 all remain exactly as they were, byte for byte,
+// forever retrievable through GetSecret/ListVersions like any other
+// version. This is the one safe way this service ever "undoes" a change —
+// there is deliberately no method anywhere in this codebase that deletes
+// or overwrites a newer version to get back to an older value.
+//
+// Gated on secrets:rollback specifically, not secrets:update — see
+// permSecretsRollback's own doc comment for why holding secrets:read (or
+// even secrets:update) must not be enough on its own. The path-policy
+// layer still checks policy.ActionUpdate, the same action an ordinary
+// update requires: a rollback is, in every way that matters to the path
+// policy, a write to this path.
+//
+// Concurrency and "don't silently overwrite a change you didn't know
+// about" both work exactly like UpdateSecret: ExpectedVersion is checked
+// against the secret's actual current version before anything is
+// decrypted or encrypted, and CreateVersionIfCurrent's row lock
+// re-validates that same expectation atomically before the insert
+// happens. This matters specifically for rollback, not just symmetry with
+// update: without it, a rollback silently re-anchors itself to whatever
+// version happens to be current at the moment it runs rather than the
+// version its caller actually looked at before clicking "roll back" — two
+// racing writers (one rollback, one ordinary update) would then both
+// succeed, one quietly on top of the other, instead of the second one
+// failing with entity.ErrVersionConflict the way this codebase's own "no
+// silent overwrites, ever" rule requires.
+func (s *SecretService) RollbackSecret(ctx context.Context, in RollbackSecretInput) (SecretMetadata, error) {
+	path, err := s.authorizeSecretAccess(ctx, in.ActorUserID, in.ActorIsServiceAccount, in.OrganizationID, permSecretsRollback, in.Path, in.IPAddress, policy.ActionUpdate)
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+	if in.TargetVersion <= 0 {
+		return SecretMetadata{}, fmt.Errorf("service: RollbackSecret requires a positive TargetVersion")
+	}
+	if in.ExpectedVersion <= 0 {
+		return SecretMetadata{}, fmt.Errorf("service: RollbackSecret requires a positive ExpectedVersion")
+	}
+
+	secret, err := s.repo.GetByPath(ctx, in.OrganizationID, path)
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+	if secret.CurrentVersion != in.ExpectedVersion {
+		return SecretMetadata{}, entity.ErrVersionConflict
+	}
+
+	// GetVersion filters deleted_at IS NULL exactly like GetByPath does for
+	// the parent secret — a version this codebase's own (not yet exposed)
+	// SoftDeleteVersion retired is entity.ErrNotFound here, the same as one
+	// that never existed. "Roll back to a retired version" is refused, not
+	// silently resurrected.
+	target, err := s.repo.GetVersion(ctx, secret.ID, in.TargetVersion)
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+
+	targetEncrypted := &secrets.EncryptedPayload{
+		Ciphertext: target.Ciphertext, Nonce: target.Nonce, AuthTag: target.AuthTag,
+		WrappedDEK: target.WrappedDEK, KeyID: target.KeyID, Algorithm: target.Algorithm,
+	}
+	plaintext, err := s.enc.Decrypt(ctx, targetEncrypted, secrets.EncryptContext{SecretID: secret.ID, Version: target.Version})
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+
+	// Re-encrypted as a genuinely new version, never the target's ciphertext
+	// copied verbatim: AES-GCM's additional authenticated data binds the
+	// version number it was encrypted under (secrets.EncryptContext), so
+	// version 4's stored ciphertext must be sealed with Version: 4, not the
+	// Version: 1 target.Ciphertext already carries — reusing the old bytes
+	// directly would fail to decrypt the moment anything read it back as
+	// version 4.
+	nextVersion := in.ExpectedVersion + 1
+	reEncrypted, err := s.enc.Encrypt(ctx, plaintext, secrets.EncryptContext{SecretID: secret.ID, Version: nextVersion})
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+
+	newVersion := &entity.SecretVersion{
+		SecretID: secret.ID, Ciphertext: reEncrypted.Ciphertext, Nonce: reEncrypted.Nonce, AuthTag: reEncrypted.AuthTag,
+		Algorithm: reEncrypted.Algorithm, WrappedDEK: reEncrypted.WrappedDEK, KeyID: reEncrypted.KeyID,
+		CreatedBy: in.ActorUserID,
+	}
+	if err := s.repo.CreateVersionIfCurrent(ctx, newVersion, in.ExpectedVersion); err != nil {
+		return SecretMetadata{}, err
+	}
+	secret.CurrentVersion = newVersion.Version
+	secret.UpdatedAt = newVersion.CreatedAt
+
+	s.recordSecretAudit(ctx, "secret.version_rollback", in.ActorUserID, in.ActorIsServiceAccount, secret, entity.AuditResultSuccess, in.IPAddress,
+		map[string]any{"path": secret.Path, "from_version": in.TargetVersion, "to_version": newVersion.Version})
 	return secretMetadataFromEntity(secret), nil
 }
 

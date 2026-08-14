@@ -34,3 +34,23 @@ export interface SecretCreateRequest {
 export interface SecretUpdateRequest {
   data: Record<string, string>
 }
+
+/** GET /v1/secrets/{path}?versions=true's row shape — metadata only,
+ * mirrors dto.SecretVersionResponse exactly. No field here could ever
+ * hold a decrypted value, ciphertext, nonce, or key ID. */
+export interface SecretVersionResponse {
+  version: number
+  created_by: string
+  created_at: string
+  current: boolean
+}
+
+/** POST /v1/secrets/rollback's body. version names the historical version
+ * to restore — the version the caller believes is current right now
+ * travels via the identical If-Match header updateSecret already uses,
+ * not a body field (mirrors dto.SecretRollbackRequest exactly; see that
+ * type's own doc comment for why). */
+export interface SecretRollbackRequest {
+  path: string
+  version: number
+}

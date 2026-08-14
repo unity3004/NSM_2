@@ -20,6 +20,13 @@ const (
 	ownerID   = "user-owner-1"
 	readerID  = "user-reader-1"
 	nobodyID  = "user-nobody-1" // authenticated, but holds no secrets:* grants
+	// updaterID holds secrets:read + secrets:update but deliberately not
+	// secrets:rollback — the one identity in this fixture that exists
+	// specifically to prove "read != rollback" and "update != rollback"
+	// (permSecretsRollback's own doc comment) against a caller who is
+	// otherwise a fully legitimate secret writer, not merely an
+	// unauthenticated or no-permissions-at-all caller the way nobodyID is.
+	updaterID = "user-updater-1"
 )
 
 // testSecretEnv is everything one test needs: a SecretService plus direct
@@ -98,7 +105,10 @@ func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	rbacRepo.Grant(ownerID, permSecretsUpdate)
 	rbacRepo.Grant(ownerID, permSecretsDelete)
 	rbacRepo.Grant(ownerID, permSecretsList)
+	rbacRepo.Grant(ownerID, permSecretsRollback)
 	rbacRepo.Grant(readerID, permSecretsRead)
+	rbacRepo.Grant(updaterID, permSecretsRead)
+	rbacRepo.Grant(updaterID, permSecretsUpdate)
 
 	policyRepo.GrantFullAccessToRole(testFullAccessRoleID)
 	if err := users.GrantRole(t.Context(), &entity.UserRole{UserID: ownerID, RoleID: testFullAccessRoleID}); err != nil {
@@ -106,6 +116,9 @@ func newTestSecretEnv(t *testing.T) *testSecretEnv {
 	}
 	if err := users.GrantRole(t.Context(), &entity.UserRole{UserID: readerID, RoleID: testFullAccessRoleID}); err != nil {
 		t.Fatalf("GrantRole(reader): %v", err)
+	}
+	if err := users.GrantRole(t.Context(), &entity.UserRole{UserID: updaterID, RoleID: testFullAccessRoleID}); err != nil {
+		t.Fatalf("GrantRole(updater): %v", err)
 	}
 
 	svc := NewSecretService(repo, enc, rbacSvc, policySvc, auditTx)
@@ -874,5 +887,379 @@ func TestSecretService_ServiceAccountActor_UserRoleGrantDoesNotLeakToServiceAcco
 		OrganizationID: testOrgID, Path: "app/shared-id-db", ActorUserID: sharedID, ActorIsServiceAccount: true,
 	}); !errors.Is(err, entity.ErrForbidden) {
 		t.Errorf("GetSecret() as service account sharedID = %v, want entity.ErrForbidden (must not inherit the user grant)", err)
+	}
+}
+
+// =====================================================================
+// Secret Versioning phase: ListVersions and RollbackSecret
+// =====================================================================
+
+// threeVersionSecret creates "app/versioned" and updates it twice, so the
+// history is exactly version 1 = A, 2 = B, 3 = C — the same fixture every
+// test below builds on, matching this phase's own worked example.
+func threeVersionSecret(t *testing.T, env *testSecretEnv) SecretMetadata {
+	t.Helper()
+	meta, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", Payload: map[string]string{"value": "A"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSecret() error = %v", err)
+	}
+	meta, err = env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": "B"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSecret() (v2) error = %v", err)
+	}
+	meta, err = env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": "C"}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSecret() (v3) error = %v", err)
+	}
+	if meta.CurrentVersion != 3 {
+		t.Fatalf("threeVersionSecret setup: CurrentVersion = %d, want 3", meta.CurrentVersion)
+	}
+	return meta
+}
+
+func valueAtVersion(t *testing.T, env *testSecretEnv, path string, version int) string {
+	t.Helper()
+	val, err := env.svc.GetSecret(t.Context(), GetSecretInput{
+		OrganizationID: testOrgID, Path: path, Version: &version, ActorUserID: readerID,
+	})
+	if err != nil {
+		t.Fatalf("GetSecret() version %d error = %v", version, err)
+	}
+	return val.Payload["value"]
+}
+
+// --- ListVersions: metadata for every version, current flagged correctly ---
+
+func TestSecretService_ListVersions_ReturnsMetadataForEveryVersion(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	versions, err := env.svc.ListVersions(t.Context(), ListVersionsInput{
+		OrganizationID: testOrgID, Path: "app/versioned", ActorUserID: readerID,
+	})
+	if err != nil {
+		t.Fatalf("ListVersions() error = %v", err)
+	}
+	if len(versions) != 3 {
+		t.Fatalf("ListVersions() returned %d entries, want 3", len(versions))
+	}
+	// Newest first (repository.SecretRepository.ListVersions' own contract).
+	wantVersions := []int{3, 2, 1}
+	for i, v := range versions {
+		if v.Version != wantVersions[i] {
+			t.Errorf("versions[%d].Version = %d, want %d", i, v.Version, wantVersions[i])
+		}
+		wantCurrent := v.Version == 3
+		if v.Current != wantCurrent {
+			t.Errorf("versions[%d] (version %d) Current = %v, want %v", i, v.Version, v.Current, wantCurrent)
+		}
+		if v.CreatedBy != ownerID {
+			t.Errorf("versions[%d].CreatedBy = %q, want %q", i, v.CreatedBy, ownerID)
+		}
+	}
+}
+
+func TestSecretService_ListVersions_WithoutSecretsRead_Forbidden(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	_, err := env.svc.ListVersions(t.Context(), ListVersionsInput{
+		OrganizationID: testOrgID, Path: "app/versioned", ActorUserID: nobodyID,
+	})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("ListVersions() without secrets:read, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// --- RollbackSecret: creates version N+1 from a historical value, never
+// deletes or overwrites anything ---
+
+func TestSecretService_RollbackSecret_CreatesNewVersionWithTargetValue(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	meta, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("RollbackSecret() error = %v", err)
+	}
+	if meta.CurrentVersion != 4 {
+		t.Errorf("RollbackSecret() CurrentVersion = %d, want 4", meta.CurrentVersion)
+	}
+	if got := valueAtVersion(t, env, "app/versioned", 4); got != "A" {
+		t.Errorf("version 4 value = %q, want %q (version 1's value)", got, "A")
+	}
+}
+
+func TestSecretService_RollbackSecret_PreservesAllHistoricalVersions(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	if _, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("RollbackSecret() error = %v", err)
+	}
+
+	want := map[int]string{1: "A", 2: "B", 3: "C", 4: "A"}
+	for version, wantValue := range want {
+		if got := valueAtVersion(t, env, "app/versioned", version); got != wantValue {
+			t.Errorf("version %d value = %q, want %q — rollback must never mutate an existing version", version, got, wantValue)
+		}
+	}
+
+	versions, err := env.svc.ListVersions(t.Context(), ListVersionsInput{
+		OrganizationID: testOrgID, Path: "app/versioned", ActorUserID: readerID,
+	})
+	if err != nil {
+		t.Fatalf("ListVersions() error = %v", err)
+	}
+	if len(versions) != 4 {
+		t.Fatalf("ListVersions() after rollback returned %d entries, want 4 (1, 2, 3, 4 — nothing destroyed)", len(versions))
+	}
+	for _, v := range versions {
+		wantCurrent := v.Version == 4
+		if v.Current != wantCurrent {
+			t.Errorf("version %d Current = %v, want %v", v.Version, v.Current, wantCurrent)
+		}
+	}
+}
+
+// --- Rollback authorization: read != rollback, update != rollback ---
+
+func TestSecretService_RollbackSecret_WithoutSecretsRollback_Forbidden(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	// updaterID holds secrets:read AND secrets:update — a real, otherwise
+	// fully-privileged secret writer — and must still be denied: this is
+	// the test that actually proves permSecretsRollback is checked, not
+	// just declared.
+	_, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: updaterID,
+	})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("RollbackSecret() as a secrets:update (but not secrets:rollback) holder, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+func TestSecretService_RollbackSecret_ReaderOnly_Forbidden(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	_, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: readerID,
+	})
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("RollbackSecret() as secrets:read-only, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// --- Rollback against a version that does not exist ---
+
+func TestSecretService_RollbackSecret_NonexistentVersion_NotFound(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	_, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 99, ExpectedVersion: 3, ActorUserID: ownerID,
+	})
+	if !errors.Is(err, entity.ErrNotFound) {
+		t.Errorf("RollbackSecret() to a nonexistent version, error = %v, want entity.ErrNotFound", err)
+	}
+}
+
+// --- Concurrency: a rollback racing an update must never produce two
+// writers both becoming version 4 ---
+
+func TestSecretService_RollbackSecret_ConcurrentWithUpdate_OnlyOneWins(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successes, conflicts := 0, 0
+	record := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, entity.ErrVersionConflict):
+			conflicts++
+		default:
+			t.Errorf("unexpected error = %v", err)
+		}
+	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+			OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: ownerID,
+		})
+		record(err)
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+			OrganizationID: testOrgID, Path: "app/versioned", ExpectedVersion: 3,
+			Payload: map[string]string{"value": "D"}, ActorUserID: ownerID,
+		})
+		record(err)
+	}()
+	wg.Wait()
+
+	if successes != 1 {
+		t.Errorf("successes = %d, want exactly 1 — a rollback racing an update must not both land as version 4", successes)
+	}
+	if conflicts != 1 {
+		t.Errorf("conflicts = %d, want exactly 1", conflicts)
+	}
+
+	final, err := env.repo.GetByPath(t.Context(), testOrgID, "app/versioned")
+	if err != nil {
+		t.Fatalf("GetByPath() error = %v", err)
+	}
+	if final.CurrentVersion != 4 {
+		t.Errorf("final CurrentVersion = %d, want 4 (exactly one of the two writers)", final.CurrentVersion)
+	}
+	versions, err := env.svc.ListVersions(t.Context(), ListVersionsInput{OrganizationID: testOrgID, Path: "app/versioned", ActorUserID: readerID})
+	if err != nil {
+		t.Fatalf("ListVersions() error = %v", err)
+	}
+	if len(versions) != 4 {
+		t.Errorf("ListVersions() returned %d entries, want exactly 4 — never two competing version-4 rows", len(versions))
+	}
+}
+
+// --- Audit: version_accessed distinguishes a historical read from an
+// ordinary current-version read; version_rollback carries from/to ---
+
+func TestSecretService_GetSecret_SpecificVersion_AuditsVersionAccessed(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/versioned", ActorUserID: readerID}); err != nil {
+		t.Fatalf("GetSecret() (current) error = %v", err)
+	}
+	v1 := 1
+	if _, err := env.svc.GetSecret(t.Context(), GetSecretInput{OrganizationID: testOrgID, Path: "app/versioned", Version: &v1, ActorUserID: readerID}); err != nil {
+		t.Fatalf("GetSecret() (version 1) error = %v", err)
+	}
+
+	var sawRead, sawVersionAccessed bool
+	for _, e := range env.audit.Entries {
+		switch e.Action {
+		case "secret.read":
+			sawRead = true
+		case "secret.version_accessed":
+			sawVersionAccessed = true
+			if v, _ := e.Metadata["version"].(int); v != 1 {
+				t.Errorf("secret.version_accessed metadata[version] = %v, want 1", e.Metadata["version"])
+			}
+		}
+	}
+	if !sawRead {
+		t.Error("no secret.read audit entry for the current-version GetSecret call")
+	}
+	if !sawVersionAccessed {
+		t.Error("no secret.version_accessed audit entry for the explicit-version GetSecret call")
+	}
+}
+
+func TestSecretService_RollbackSecret_AuditsFromAndToVersion(t *testing.T) {
+	env := newTestSecretEnv(t)
+	threeVersionSecret(t, env)
+
+	if _, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/versioned", TargetVersion: 1, ExpectedVersion: 3, ActorUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("RollbackSecret() error = %v", err)
+	}
+
+	var found bool
+	for _, e := range env.audit.Entries {
+		if e.Action != "secret.version_rollback" {
+			continue
+		}
+		found = true
+		if e.Result != entity.AuditResultSuccess {
+			t.Errorf("secret.version_rollback Result = %v, want success", e.Result)
+		}
+		if from, _ := e.Metadata["from_version"].(int); from != 1 {
+			t.Errorf("secret.version_rollback metadata[from_version] = %v, want 1", e.Metadata["from_version"])
+		}
+		if to, _ := e.Metadata["to_version"].(int); to != 4 {
+			t.Errorf("secret.version_rollback metadata[to_version] = %v, want 4", e.Metadata["to_version"])
+		}
+	}
+	if !found {
+		t.Error("no secret.version_rollback audit entry recorded")
+	}
+}
+
+// --- Security: rollback's re-encryption never leaks plaintext into
+// audit metadata, and never stores the target version's ciphertext
+// verbatim (it must be freshly sealed under the new version's own AAD) ---
+
+func TestSecretService_RollbackSecret_NeverLeaksPlaintextOrReusesRawCiphertext(t *testing.T) {
+	env := newTestSecretEnv(t)
+	const marker = "THIS_IS_TEST_ROLLBACK_VALUE"
+
+	meta, err := env.svc.CreateSecret(t.Context(), CreateSecretInput{
+		OrganizationID: testOrgID, Path: "app/rollback-marker", Payload: map[string]string{"value": marker}, ActorUserID: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSecret() error = %v", err)
+	}
+	if _, err := env.svc.UpdateSecret(t.Context(), UpdateSecretInput{
+		OrganizationID: testOrgID, Path: "app/rollback-marker", ExpectedVersion: meta.CurrentVersion,
+		Payload: map[string]string{"value": marker + "-v2"}, ActorUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("UpdateSecret() error = %v", err)
+	}
+	if _, err := env.svc.RollbackSecret(t.Context(), RollbackSecretInput{
+		OrganizationID: testOrgID, Path: "app/rollback-marker", TargetVersion: 1, ExpectedVersion: 2, ActorUserID: ownerID,
+	}); err != nil {
+		t.Fatalf("RollbackSecret() error = %v", err)
+	}
+
+	for _, e := range env.audit.Entries {
+		encoded, err := json.Marshal(e.Metadata)
+		if err != nil {
+			t.Fatalf("marshaling audit metadata: %v", err)
+		}
+		if strings.Contains(string(encoded), marker) {
+			t.Errorf("audit entry action=%q metadata contains the plaintext marker: %s", e.Action, encoded)
+		}
+	}
+
+	secret, err := env.repo.GetByPath(t.Context(), testOrgID, "app/rollback-marker")
+	if err != nil {
+		t.Fatalf("GetByPath() error = %v", err)
+	}
+	v1, err := env.repo.GetVersion(t.Context(), secret.ID, 1)
+	if err != nil {
+		t.Fatalf("GetVersion(1) error = %v", err)
+	}
+	v3, err := env.repo.GetVersion(t.Context(), secret.ID, 3) // the rollback-created version
+	if err != nil {
+		t.Fatalf("GetVersion(3) error = %v", err)
+	}
+	if string(v1.Ciphertext) == string(v3.Ciphertext) {
+		t.Error("rollback stored version 1's ciphertext verbatim — every version must be independently, freshly encrypted (fresh nonce, version-bound AAD)")
+	}
+	if strings.Contains(string(v1.Ciphertext), marker) || strings.Contains(string(v3.Ciphertext), marker) {
+		t.Error("stored ciphertext contains the plaintext marker in the clear")
 	}
 }

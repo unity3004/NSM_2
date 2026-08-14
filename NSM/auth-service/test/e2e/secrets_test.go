@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/acme/auth-service/internal/dto"
@@ -273,6 +274,9 @@ func TestSecretsE2E_AuthorizedOperations(t *testing.T) {
 	t.Run("OversizedRequest_Rejected", func(t *testing.T) {
 		testSecretsOversizedRequest(t, env, client, token)
 	})
+	t.Run("VersioningAndRollback", func(t *testing.T) {
+		testSecretsVersioningAndRollback(t, env, client, token)
+	})
 }
 
 // testSecretsFullLifecycle covers items 3-8, 10, 16, 17, and the task's own
@@ -502,11 +506,19 @@ func testSecretsFullLifecycle(t *testing.T, env *e2eEnv, client *http.Client, to
 		if err := env.DB.QueryRow(`SELECT id FROM secrets WHERE path = $1`, path).Scan(&secretID); err != nil {
 			t.Fatalf("look up secret id: %v", err)
 		}
+		// secret.read = 2 (Read, ReadCurrentIsVersion2 — both current-version
+		// reads), not 3: ReadVersion1Unchanged explicitly names a historical
+		// version (?version=1), which the Secret Versioning phase now
+		// audits as the more precise secret.version_accessed instead — see
+		// SecretService.GetSecret's own doc comment on that split. The
+		// total "a read happened" count (2 + 1) is unchanged from before
+		// that phase; only the label on the explicit-version one is.
 		wantCounts := map[string]int{
-			"secret.created": 1,
-			"secret.read":    3,
-			"secret.updated": 1,
-			"secret.deleted": 1,
+			"secret.created":          1,
+			"secret.read":             2,
+			"secret.version_accessed": 1,
+			"secret.updated":          1,
+			"secret.deleted":          1,
 		}
 		for action, want := range wantCounts {
 			if n := auditCount(t, env, action, secretID); n != want {
@@ -628,4 +640,246 @@ func testSecretsOversizedRequest(t *testing.T, env *e2eEnv, client *http.Client,
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body length = %d", res.StatusCode, len(body))
 	}
+}
+
+// testSecretsVersioningAndRollback is the Secret Versioning phase's own
+// full worked example, against a real router and a real Postgres
+// database: create (version 1 = password-one), update twice (version 2 =
+// password-two, version 3 = password-three), list the version history,
+// retrieve version 1 explicitly, roll back to it (creating version 4 =
+// password-one, never touching 1-3), verify every version's audit trail,
+// verify no plaintext ever reached the database, and verify a rollback
+// racing an ordinary update against the same real database row cannot
+// both land (this task's own "add an integration test" requirement for
+// concurrency, item 14 — TestSecretService_RollbackSecret_ConcurrentWithUpdate_OnlyOneWins
+// already covers the identical scenario against the in-memory fake; this
+// is the same guarantee proven against Postgres's own row lock).
+func testSecretsVersioningAndRollback(t *testing.T, env *e2eEnv, client *http.Client, token string) {
+	path := "vaultis/demo/" + uniqueSuffix(t) + "/database"
+	v1, v2, v3 := "password-one", "password-two", "password-three"
+
+	// --- Create -> version 1 ---
+	res, body := doAuthed(t, client, http.MethodPost, env.Server.URL+"/v1/secrets", token,
+		map[string]any{"path": path, "data": map[string]string{"password": v1}}, nil)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/secrets: status = %d, want 201; body = %s", res.StatusCode, body)
+	}
+
+	// --- Update -> version 2, Update -> version 3 ---
+	res, body = doAuthed(t, client, http.MethodPut, env.Server.URL+"/v1/secrets/"+path, token,
+		map[string]any{"data": map[string]string{"password": v2}}, map[string]string{"If-Match": `"1"`})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("PUT (v2): status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+	res, body = doAuthed(t, client, http.MethodPut, env.Server.URL+"/v1/secrets/"+path, token,
+		map[string]any{"data": map[string]string{"password": v3}}, map[string]string{"If-Match": `"2"`})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("PUT (v3): status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+
+	// --- Database plaintext verification (item 21): none of the three
+	// plaintext values may appear anywhere in secret_versions' raw bytes. ---
+	var secretID string
+	if err := env.DB.QueryRow(`SELECT id FROM secrets WHERE path = $1`, path).Scan(&secretID); err != nil {
+		t.Fatalf("look up secret id: %v", err)
+	}
+	rows, err := env.DB.Query(`SELECT version, ciphertext FROM secret_versions WHERE secret_id = $1 ORDER BY version`, secretID)
+	if err != nil {
+		t.Fatalf("query secret_versions: %v", err)
+	}
+	var rawVersions int
+	for rows.Next() {
+		var version int
+		var ciphertext []byte
+		if err := rows.Scan(&version, &ciphertext); err != nil {
+			t.Fatalf("scan secret_versions row: %v", err)
+		}
+		rawVersions++
+		lower := strings.ToLower(string(ciphertext))
+		for _, plaintext := range []string{v1, v2, v3} {
+			if strings.Contains(lower, strings.ToLower(plaintext)) {
+				t.Errorf("secret_versions row (version %d) ciphertext contains plaintext %q in the clear", version, plaintext)
+			}
+		}
+	}
+	rows.Close()
+	if rawVersions != 3 {
+		t.Fatalf("secret_versions row count = %d, want 3 before rollback", rawVersions)
+	}
+
+	// --- List versions (item 8): metadata only, newest first, current flagged ---
+	res, body = doAuthed(t, client, http.MethodGet, env.Server.URL+"/v1/secrets/"+path+"?versions=true", token, nil, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET ?versions=true: status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+	var versionList struct {
+		Data []dto.SecretVersionResponse `json:"data"`
+	}
+	if err := json.Unmarshal(body, &versionList); err != nil {
+		t.Fatalf("decode version list: %v", err)
+	}
+	if len(versionList.Data) != 3 {
+		t.Fatalf("version list length = %d, want 3", len(versionList.Data))
+	}
+	if versionList.Data[0].Version != 3 || !versionList.Data[0].Current {
+		t.Errorf("version list[0] = %+v, want version 3, current=true (newest first)", versionList.Data[0])
+	}
+	lowerVersionList := strings.ToLower(string(body))
+	for _, plaintext := range []string{v1, v2, v3} {
+		if strings.Contains(lowerVersionList, strings.ToLower(plaintext)) {
+			t.Errorf("version list response unexpectedly contains plaintext %q: %s", plaintext, body)
+		}
+	}
+
+	// --- Retrieve version 1 explicitly (item 7) ---
+	res, body = doAuthed(t, client, http.MethodGet, env.Server.URL+"/v1/secrets/"+path+"?version=1", token, nil, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET ?version=1: status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+	var v1Value dto.SecretValueResponse
+	if err := json.Unmarshal(body, &v1Value); err != nil {
+		t.Fatalf("decode version 1 value: %v", err)
+	}
+	if v1Value.Data["password"] != v1 {
+		t.Errorf("version 1 password = %q, want %q", v1Value.Data["password"], v1)
+	}
+
+	// --- Rollback to version 1 (items 9-11): creates version 4, never
+	// deletes 1-3. Requires the current version via If-Match, exactly like
+	// update (see secret_handler.go's rollback). ---
+	res, body = doAuthed(t, client, http.MethodPost, env.Server.URL+"/v1/secrets/rollback", token,
+		map[string]any{"path": path, "version": 1}, map[string]string{"If-Match": `"3"`})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("POST /v1/secrets/rollback: status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+	var rolledBack dto.SecretResponse
+	if err := json.Unmarshal(body, &rolledBack); err != nil {
+		t.Fatalf("decode rollback SecretResponse: %v", err)
+	}
+	if rolledBack.Version != 4 {
+		t.Fatalf("rollback response Version = %d, want 4", rolledBack.Version)
+	}
+	if strings.Contains(strings.ToLower(string(body)), strings.ToLower(v1)) {
+		t.Errorf("rollback response unexpectedly contains plaintext: %s", body)
+	}
+
+	// --- Versions 1, 2, 3 remain intact; version 4 == version 1's value and is current ---
+	for version, want := range map[int]string{1: v1, 2: v2, 3: v3, 4: v1} {
+		res, body := doAuthed(t, client, http.MethodGet, fmt.Sprintf("%s/v1/secrets/%s?version=%d", env.Server.URL, path, version), token, nil, nil)
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("GET ?version=%d after rollback: status = %d, want 200; body = %s", version, res.StatusCode, body)
+		}
+		var val dto.SecretValueResponse
+		if err := json.Unmarshal(body, &val); err != nil {
+			t.Fatalf("decode version %d value: %v", version, err)
+		}
+		if val.Data["password"] != want {
+			t.Errorf("version %d password = %q, want %q — rollback must not mutate existing versions", version, val.Data["password"], want)
+		}
+	}
+	res, body = doAuthed(t, client, http.MethodGet, env.Server.URL+"/v1/secrets/"+path, token, nil, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET (current) after rollback: status = %d, want 200; body = %s", res.StatusCode, body)
+	}
+	var current dto.SecretValueResponse
+	if err := json.Unmarshal(body, &current); err != nil {
+		t.Fatalf("decode current value: %v", err)
+	}
+	if current.Version != 4 || current.Data["password"] != v1 {
+		t.Errorf("current value = %+v, want version 4 with password %q", current, v1)
+	}
+
+	// --- Rollback-created ciphertext is freshly sealed, never the raw
+	// version-1 ciphertext copied verbatim (item 16: independent encryption
+	// per version), and still contains no plaintext ---
+	var v1Ciphertext, v4Ciphertext []byte
+	if err := env.DB.QueryRow(`SELECT ciphertext FROM secret_versions WHERE secret_id = $1 AND version = 1`, secretID).Scan(&v1Ciphertext); err != nil {
+		t.Fatalf("read version 1 ciphertext: %v", err)
+	}
+	if err := env.DB.QueryRow(`SELECT ciphertext FROM secret_versions WHERE secret_id = $1 AND version = 4`, secretID).Scan(&v4Ciphertext); err != nil {
+		t.Fatalf("read version 4 ciphertext: %v", err)
+	}
+	if string(v1Ciphertext) == string(v4Ciphertext) {
+		t.Error("rollback stored version 1's ciphertext verbatim as version 4 — every version must be independently encrypted")
+	}
+	if strings.Contains(strings.ToLower(string(v4Ciphertext)), strings.ToLower(v1)) {
+		t.Error("version 4's ciphertext contains the plaintext password in the clear")
+	}
+
+	// --- Audit events (item 18): version_accessed for the explicit-version
+	// read, version_rollback for the rollback, both attributed to this
+	// secret's ID, neither ever carrying plaintext. ---
+	if n := auditCount(t, env, "secret.version_accessed", secretID); n < 1 {
+		t.Errorf("secret.version_accessed audit count for secret %s = %d, want >= 1", secretID, n)
+	}
+	if n := auditCount(t, env, "secret.version_rollback", secretID); n != 1 {
+		t.Errorf("secret.version_rollback audit count for secret %s = %d, want 1", secretID, n)
+	}
+	var auditMetadata []byte
+	if err := env.DB.QueryRow(
+		`SELECT metadata FROM audit_logs WHERE action = 'secret.version_rollback' AND resource_id = $1`, secretID,
+	).Scan(&auditMetadata); err != nil {
+		t.Fatalf("read secret.version_rollback audit metadata: %v", err)
+	}
+	lowerMetadata := strings.ToLower(string(auditMetadata))
+	for _, plaintext := range []string{v1, v2, v3} {
+		if strings.Contains(lowerMetadata, strings.ToLower(plaintext)) {
+			t.Errorf("secret.version_rollback audit metadata unexpectedly contains plaintext %q: %s", plaintext, auditMetadata)
+		}
+	}
+
+	// --- Concurrency (item 14, and this task's own explicit "add an
+	// integration test" requirement): a rollback and an ordinary update,
+	// both believing version 4 is current, fired concurrently against the
+	// same real Postgres row. Exactly one may succeed; the other must see
+	// entity.ErrVersionConflict (409), never a silently-lost update and
+	// never two rows both claiming version 5. ---
+	t.Run("ConcurrentRollbackAndUpdate_OnlyOneWins", func(t *testing.T) {
+		var wg sync.WaitGroup
+		statuses := make([]int, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			res, _ := doAuthed(t, client, http.MethodPost, env.Server.URL+"/v1/secrets/rollback", token,
+				map[string]any{"path": path, "version": 2}, map[string]string{"If-Match": `"4"`})
+			statuses[0] = res.StatusCode
+		}()
+		go func() {
+			defer wg.Done()
+			res, _ := doAuthed(t, client, http.MethodPut, env.Server.URL+"/v1/secrets/"+path, token,
+				map[string]any{"data": map[string]string{"password": "password-concurrent"}}, map[string]string{"If-Match": `"4"`})
+			statuses[1] = res.StatusCode
+		}()
+		wg.Wait()
+
+		successes, conflicts := 0, 0
+		for _, code := range statuses {
+			switch code {
+			case http.StatusOK:
+				successes++
+			case http.StatusConflict:
+				conflicts++
+			default:
+				t.Errorf("unexpected status %d (want 200 or 409)", code)
+			}
+		}
+		if successes != 1 || conflicts != 1 {
+			t.Errorf("successes=%d conflicts=%d, want exactly 1 of each — a rollback racing an update must not both land as version 5", successes, conflicts)
+		}
+
+		var finalVersion int
+		if err := env.DB.QueryRow(`SELECT current_version FROM secrets WHERE id = $1`, secretID).Scan(&finalVersion); err != nil {
+			t.Fatalf("read final current_version: %v", err)
+		}
+		if finalVersion != 5 {
+			t.Errorf("final current_version = %d, want 5 (exactly one of the two racing writers)", finalVersion)
+		}
+		var totalVersions int
+		if err := env.DB.QueryRow(`SELECT count(*) FROM secret_versions WHERE secret_id = $1`, secretID).Scan(&totalVersions); err != nil {
+			t.Fatalf("count secret_versions: %v", err)
+		}
+		if totalVersions != 5 {
+			t.Errorf("secret_versions row count = %d, want exactly 5 — never two competing version-5 rows", totalVersions)
+		}
+	})
 }

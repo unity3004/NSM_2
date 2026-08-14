@@ -95,3 +95,51 @@ func SecretValueResponseFromValue(v service.SecretValue) SecretValueResponse {
 		CreatedAt: v.Metadata.CreatedAt, UpdatedAt: v.Metadata.UpdatedAt,
 	}
 }
+
+// SecretVersionResponse is one row of GET /v1/secrets/{path}?versions'
+// body — metadata only, matching SecretVersionMetadata's own "safe to
+// return" guarantee (no ciphertext, nonce, or key field exists on this
+// type to leak one through).
+type SecretVersionResponse struct {
+	Version   int       `json:"version"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Current   bool      `json:"current"`
+}
+
+func SecretVersionResponseFromMetadata(m service.SecretVersionMetadata) SecretVersionResponse {
+	return SecretVersionResponse{Version: m.Version, CreatedBy: m.CreatedBy, CreatedAt: m.CreatedAt, Current: m.Current}
+}
+
+// SecretRollbackRequest matches components.schemas.SecretRollback — Path
+// travels in the body the same way SecretCreateRequest's already does
+// (this is, like create, a request against the /v1/secrets collection,
+// not a specific {path...} resource URL — see secret_handler.go's
+// rollback for why: the trailing-wildcard {path...} pattern an ordinary
+// per-secret route uses cannot also be followed by a literal "/rollback"
+// segment in this router's stdlib ServeMux, the same constraint that
+// keeps GET /v1/secrets/{path...}'s own version listing/lookup on query
+// parameters rather than additional path segments too).
+//
+// Version is the historical version to restore (RollbackSecretInput.TargetVersion)
+// — the version the caller believes is current *right now* is deliberately
+// not a body field at all: it travels via the identical If-Match header
+// PUT /v1/secrets/{path...} already requires (see secret_handler.go's
+// rollback), so a client that already knows how to build an update request
+// needs no second convention to build a rollback one.
+type SecretRollbackRequest struct {
+	Path    string `json:"path"`
+	Version int    `json:"version"`
+}
+
+func (r SecretRollbackRequest) Validate() error {
+	var errs ValidationErrors
+	path := util.NormalizeSecretPath(r.Path)
+	if err := util.ValidateSecretPath(path); err != nil {
+		errs.Add("path", err.Error())
+	}
+	if r.Version <= 0 {
+		errs.Add("version", "must be a positive integer")
+	}
+	return errs.Err()
+}

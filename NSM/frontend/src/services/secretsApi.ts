@@ -1,6 +1,13 @@
 import { httpClient } from "@/services/httpClient"
 import type { ListResponse } from "@/types/common"
-import type { SecretCreateRequest, SecretResponse, SecretUpdateRequest, SecretValueResponse } from "@/types/secret"
+import type {
+  SecretCreateRequest,
+  SecretResponse,
+  SecretRollbackRequest,
+  SecretUpdateRequest,
+  SecretValueResponse,
+  SecretVersionResponse,
+} from "@/types/secret"
 
 /** Encodes each path segment individually — encodeURIComponent on the
  * whole path would escape the '/' hierarchy separators the backend's
@@ -57,4 +64,33 @@ export function updateSecret(
  * destroys ciphertext through this call. Requires secrets:delete. */
 export function deleteSecret(path: string): Promise<void> {
   return httpClient.delete<void>(`/v1/secrets/${encodeSecretPath(path)}`)
+}
+
+/** GET /v1/secrets/{path}?versions=true — metadata only for every
+ * non-destroyed version, newest first, never a value. Requires
+ * secrets:read (the same permission a current-value GET already
+ * requires, not secrets:list — see SecretService.ListVersions' own doc
+ * comment on the backend). */
+export function listSecretVersions(path: string, signal?: AbortSignal): Promise<{ data: SecretVersionResponse[] }> {
+  return httpClient.get<{ data: SecretVersionResponse[] }>(`/v1/secrets/${encodeSecretPath(path)}?versions=true`, {
+    signal,
+  })
+}
+
+/** POST /v1/secrets/rollback — creates a new version whose value equals
+ * targetVersion's; never deletes or mutates any existing version.
+ * Requires secrets:rollback, a distinct permission from secrets:update
+ * (see permSecretsRollback's own doc comment on the backend — "read a
+ * secret's history must not imply may make an old value current again").
+ * expectedVersion (the version the caller believes is current right now)
+ * is mandatory and travels as the If-Match header, exactly like
+ * updateSecret's — a mismatch is the identical 409 VERSION_CONFLICT.
+ * retryOn401: false for the same non-idempotent-write reason
+ * createSecret/updateSecret already set it. */
+export function rollbackSecret(path: string, targetVersion: number, expectedVersion: number): Promise<SecretResponse> {
+  return httpClient.post<SecretResponse>(
+    "/v1/secrets/rollback",
+    { path, version: targetVersion } satisfies SecretRollbackRequest,
+    { headers: { "If-Match": `"${expectedVersion}"` }, retryOn401: false },
+  )
 }

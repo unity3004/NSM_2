@@ -107,6 +107,18 @@ func (h *secretHandler) create(w http.ResponseWriter, r *http.Request) {
 func (h *secretHandler) get(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 
+	// ?versions=true is a distinct response shape (version metadata only,
+	// never a value) sharing this route rather than a separate one — see
+	// dto.SecretRollbackRequest's own doc comment for why a literal
+	// "/versions" path segment can't follow {path...} in this router. Any
+	// non-empty value is accepted (mirrors this handler's own existing
+	// leniency on If-Match's surrounding quotes) since this parameter is
+	// only ever a presence flag, never echoed back or compared as data.
+	if r.URL.Query().Get("versions") != "" {
+		h.listVersions(w, r, path)
+		return
+	}
+
 	var version *int
 	if raw := r.URL.Query().Get("version"); raw != "" {
 		v, err := strconv.Atoi(raw)
@@ -130,6 +142,85 @@ func (h *secretHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, dto.SecretValueResponseFromValue(val))
+}
+
+// listVersions implements GET /v1/secrets/{path...}?versions=true —
+// version metadata only (dto.SecretVersionResponse has no field a
+// ciphertext, nonce, or key ID could occupy), newest first, exactly as
+// SecretService.ListVersions returns them.
+func (h *secretHandler) listVersions(w http.ResponseWriter, r *http.Request, path string) {
+	versions, err := h.svc.ListVersions(r.Context(), service.ListVersionsInput{
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  path,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
+	})
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	out := make([]dto.SecretVersionResponse, 0, len(versions))
+	for _, v := range versions {
+		out = append(out, dto.SecretVersionResponseFromMetadata(v))
+	}
+	// No dto.PageMeta here, unlike every other list endpoint in this
+	// codebase: a secret's version history is never paginated — every
+	// non-destroyed version is returned every time, which is what makes
+	// ListVersions' own "newest first, everything" contract meaningful in
+	// the first place (a partial history would silently misrepresent a
+	// secret's own current version if 000024's schema ever grew enough
+	// versions to need a real cursor, which no operational secret does
+	// today).
+	writeJSON(w, r, http.StatusOK, struct {
+		Data []dto.SecretVersionResponse `json:"data"`
+	}{Data: out})
+}
+
+// rollback implements POST /v1/secrets/rollback — a collection-level
+// route, not /v1/secrets/{path...}/rollback, for the identical routing
+// reason GET /v1/secrets/{path...}?versions=true isn't
+// GET /v1/secrets/{path...}/versions (see dto.SecretRollbackRequest's own
+// doc comment). Requires secrets:rollback (router.go), a distinct
+// permission from secrets:update — see permSecretsRollback's own doc
+// comment in secret_service.go.
+//
+// The expected current version is required via the identical If-Match
+// header PUT (update) already requires — see that handler's own doc
+// comment on why this can never be optional; RollbackSecretInput.ExpectedVersion
+// carries the same "don't silently overwrite a change you didn't know
+// about" guarantee for rollback that ExpectedVersion already gives update.
+func (h *secretHandler) rollback(w http.ResponseWriter, r *http.Request) {
+	expected, ok := parseIfMatch(r)
+	if !ok {
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError,
+			`If-Match header is required and must name the current version, e.g. If-Match: "3".`, nil)
+		return
+	}
+
+	var req dto.SecretRollbackRequest
+	if !decodeSecretJSON(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeValidationError(w, r, err)
+		return
+	}
+
+	meta, err := h.svc.RollbackSecret(r.Context(), service.RollbackSecretInput{
+		OrganizationID:        organizationIDFromRequest(r),
+		Path:                  req.Path,
+		TargetVersion:         req.Version,
+		ExpectedVersion:       expected,
+		ActorUserID:           actorUserID(r),
+		ActorIsServiceAccount: isServiceAccount(r),
+		IPAddress:             clientIP(r),
+	})
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, r, http.StatusOK, dto.SecretResponseFromMetadata(meta))
 }
 
 // update implements PUT /v1/secrets/{path...}. The expected current

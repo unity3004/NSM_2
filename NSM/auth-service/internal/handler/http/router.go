@@ -286,6 +286,22 @@ func NewRouter(deps RouterDeps) http.Handler {
 		secrets := &secretHandler{svc: deps.SecretService}
 		mux.Handle("GET /v1/secrets", rateLimit(categorySecretsRead, requirePermission("secrets:list", secrets.list)))
 		mux.Handle("POST /v1/secrets", rateLimit(categorySecretsWrite, requirePermission("secrets:create", secrets.create)))
+		// Registered ahead of the {path...} routes below only for
+		// readability grouping — Go's ServeMux resolves by pattern
+		// specificity, not registration order, so this position carries no
+		// routing significance. secrets:rollback (migrations/000032) is
+		// deliberately distinct from secrets:update — see
+		// permSecretsRollback's own doc comment (secret_service.go).
+		// POST /v1/secrets/rollback, not POST /v1/secrets/{path...}/rollback:
+		// see dto.SecretRollbackRequest's own doc comment for why a literal
+		// trailing segment can't follow {path...} in this router at all.
+		mux.Handle("POST /v1/secrets/rollback", rateLimit(categorySecretsWrite, requirePermission("secrets:rollback", secrets.rollback)))
+		// GET .../{path...}?versions=true (version metadata list) and
+		// ?version=N (a specific historical value) both share this one
+		// route — see secretHandler.get's own doc comment on ?versions.
+		// Both still require secrets:read, the same as an ordinary
+		// current-value read; secretHandler.get/listVersions dispatch
+		// between the three response shapes internally.
 		mux.Handle("GET /v1/secrets/{path...}", rateLimit(categorySecretsRead, requirePermission("secrets:read", secrets.get)))
 		mux.Handle("PUT /v1/secrets/{path...}", rateLimit(categorySecretsWrite, requirePermission("secrets:update", secrets.update)))
 		mux.Handle("DELETE /v1/secrets/{path...}", rateLimit(categorySecretsWrite, requirePermission("secrets:delete", secrets.delete)))

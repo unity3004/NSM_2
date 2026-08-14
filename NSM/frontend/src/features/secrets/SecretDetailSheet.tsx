@@ -16,9 +16,12 @@ import {
 import { useSecrets } from "@/features/secrets/useSecrets"
 import { useRevealSecret } from "@/features/secrets/useRevealSecret"
 import { useDeleteSecret } from "@/features/secrets/useDeleteSecret"
+import { useSecretVersions } from "@/features/secrets/useSecretVersions"
+import { useRollbackSecret } from "@/features/secrets/useRollbackSecret"
 import { UpdateSecretDialog } from "@/features/secrets/UpdateSecretDialog"
 import { usePermission } from "@/features/auth/usePermission"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
+import { formatRelativeTime } from "@/lib/utils"
 import { Eye, EyeOff, Copy, Check } from "lucide-react"
 import { toast } from "sonner"
 
@@ -50,6 +53,11 @@ export function SecretDetailSheet({
   const [maskedFields, setMaskedFields] = useState<Set<string>>(new Set())
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
+  // The version a rollback confirmation dialog is currently asking about
+  // — null means the dialog is closed. Deliberately separate state from
+  // viewingVersion: confirming a rollback for a version must not change
+  // which version's data the Reveal section below is showing.
+  const [confirmingRollbackVersion, setConfirmingRollbackVersion] = useState<number | null>(null)
 
   // Always the concrete version currently selected in the UI (the version
   // history list defaults to highlighting the current one) — computed
@@ -65,10 +73,13 @@ export function SecretDetailSheet({
   const selectedVersion = viewingVersion ?? secret?.version ?? 1
   const reveal = useRevealSecret(path ?? "", selectedVersion)
   const deleteSecret = useDeleteSecret()
+  const versionsQuery = useSecretVersions(path)
+  const rollback = useRollbackSecret(path ?? "")
 
   const canRead = usePermission("secrets:read")
   const canUpdate = usePermission("secrets:update")
   const canDelete = usePermission("secrets:delete")
+  const canRollback = usePermission("secrets:rollback")
 
   // Reset every bit of per-secret state — including whatever was revealed
   // — the moment a different secret (or none) is opened. This is the
@@ -79,9 +90,14 @@ export function SecretDetailSheet({
     setMaskedFields(new Set())
     setConfirmingDelete(false)
     setUpdateOpen(false)
+    setConfirmingRollbackVersion(null)
   }, [path])
 
-  const versions = secret ? Array.from({ length: secret.version }, (_, i) => secret.version - i) : []
+  // REAL API DATA: every row comes from GET /v1/secrets/{path}?versions=true
+  // (secrets:read-gated) — created_at, created_by, and current all come
+  // straight from secret_versions/secrets, never synthesized from the
+  // current version count the way this list used to be built.
+  const versions = versionsQuery.data?.data ?? []
 
   // Visual-only "copied" confirmation per field (a brief checkmark swap —
   // see the render below). Deliberately not an attempt to clear the OS
@@ -154,20 +170,50 @@ export function SecretDetailSheet({
 
               <section className="flex flex-col gap-2 border-t pt-4">
                 <h3 className="text-sm font-medium">Version history</h3>
+
+                {versionsQuery.isLoading && (
+                  <div className="flex flex-col gap-1.5">
+                    <Skeleton className="h-10 w-full" />
+                    <Skeleton className="h-10 w-full" />
+                  </div>
+                )}
+                {versionsQuery.isError && (
+                  <p className="text-xs text-muted-foreground">Could not load version history.</p>
+                )}
+
                 <ul className="flex flex-col gap-1">
                   {versions.map((v) => (
-                    <li key={v}>
-                      <button
-                        type="button"
-                        onClick={() => setViewingVersion(v)}
-                        className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
-                          selectedVersion === v ? "border-primary bg-accent" : "hover:bg-accent"
+                    <li key={v.version}>
+                      <div
+                        className={`flex w-full items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
+                          selectedVersion === v.version ? "border-primary bg-accent" : ""
                         }`}
-                        aria-pressed={selectedVersion === v}
                       >
-                        <span>Version {v}</span>
-                        {v === secret.version && <Badge variant="default">Current</Badge>}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => setViewingVersion(v.version)}
+                          className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left hover:opacity-80"
+                          aria-pressed={selectedVersion === v.version}
+                        >
+                          <span className="flex items-center gap-2">
+                            <span>Version {v.version}</span>
+                            {v.current && <Badge variant="default">Current</Badge>}
+                          </span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {formatRelativeTime(v.created_at)} · by {v.created_by.slice(0, 8)}…
+                          </span>
+                        </button>
+                        {canRollback && !v.current && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            onClick={() => setConfirmingRollbackVersion(v.version)}
+                          >
+                            Rollback to this version
+                          </Button>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -312,6 +358,48 @@ export function SecretDetailSheet({
               }}
             >
               {deleteSecret.isPending ? "Deleting…" : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={confirmingRollbackVersion !== null}
+        onOpenChange={(open) => !open && setConfirmingRollbackVersion(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Create a new version using the value from Version {confirmingRollbackVersion}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This creates a new version — Version {secret?.version} and every other historical
+              version remain exactly as they are, nothing is deleted or overwritten.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={rollback.isPending}
+              onClick={() => {
+                if (confirmingRollbackVersion === null || !secret) return
+                rollback.mutate(
+                  { targetVersion: confirmingRollbackVersion, expectedVersion: secret.version },
+                  {
+                    onSuccess: (updated) => {
+                      toast.success(`New version created — Version ${updated.version} is now current.`)
+                      setConfirmingRollbackVersion(null)
+                      setViewingVersion(null)
+                    },
+                    onError: (error) => {
+                      toast.error(friendlyErrorMessage(error))
+                      setConfirmingRollbackVersion(null)
+                    },
+                  },
+                )
+              }}
+            >
+              {rollback.isPending ? "Rolling back…" : "Roll back"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

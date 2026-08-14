@@ -94,6 +94,12 @@ services:
       # the keygen service above, never from a literal here.
       AUTH_ACCESS_TOKEN_KEY_ID: "dev-key-1"
       AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH: "/dev-secrets/access-token-signing-key.pem"
+      # Enables the Secrets Engine (internal/secrets.DevKeyProvider) and
+      # registers the /v1/secrets* routes — see main.go's own "AUTH_SECRETS_DEV_MASTER_KEY
+      # not set" warning log for what happens without this. A disposable,
+      # random, local-only AES-256 key (openssl rand -base64 32) —
+      # never a production key, never committed anywhere else.
+      AUTH_SECRETS_DEV_MASTER_KEY: "lUBRscqa4+uHENOYHeExzQASHHEUiL6lbybsfzCCYYs="
     volumes:
       - ./.dev-secrets:/dev-secrets:ro
     ports:
