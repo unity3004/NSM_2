@@ -1,10 +1,23 @@
 package dto
 
 import (
+	"regexp"
 	"time"
 
 	"github.com/acme/auth-service/internal/entity"
 )
+
+// auditActorIDPattern bounds AuditLogQuery.ActorID the same way
+// dto/lease.go's roleNamePattern bounds a role name: actor_id is bound
+// straight to a Postgres UUID column (audit_logs.actor_id), so a
+// non-UUID-shaped value — including a SQL-injection-shaped string, which
+// parameterized queries already make harmless as *injection* but not as
+// a well-formed query — reached the database as a raw type-cast attempt
+// and surfaced as an unmapped 500 (pq: invalid input syntax for type
+// uuid) instead of a clean 422. Validating the shape here, before this
+// value ever reaches repository.AuditLogFilter, closes that the same way
+// dto.AuditLogQuery.Validate already closes it for actor_type/result.
+var auditActorIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // AuditLogResponse matches components.schemas.AuditLogEntry. PrevHash and
 // RecordHash are exposed deliberately — an auditor or an automated integrity
@@ -29,6 +42,18 @@ type AuditLogResponse struct {
 	PrevHash       *string        `json:"prev_hash,omitempty"`
 	RecordHash     string         `json:"record_hash"`
 	OccurredAt     time.Time      `json:"occurred_at"`
+}
+
+// AuditLogSummary is GET /v1/audit-logs' own "summary" field — the Audit
+// Explorer UI's Total/Successful/Failed/Denied cards, computed server-side
+// (AuditService.ListAuditLogs, via repository.AuditLogRepository.CountByResult)
+// across every row the request's filters match, not merely the one page
+// of Data returned alongside it.
+type AuditLogSummary struct {
+	Total   int `json:"total"`
+	Success int `json:"success"`
+	Failure int `json:"failure"`
+	Denied  int `json:"denied"`
 }
 
 func AuditLogResponseFromEntity(e *entity.AuditLogEntry) AuditLogResponse {
@@ -107,6 +132,9 @@ func (q AuditLogQuery) Validate() error {
 	}
 	if q.Limit < 1 || q.Limit > 100 {
 		errs.Add("limit", "must be between 1 and 100")
+	}
+	if q.ActorID != nil && !auditActorIDPattern.MatchString(*q.ActorID) {
+		errs.Add("actor_id", "must be a valid UUID")
 	}
 	if q.ActorType != nil {
 		switch *q.ActorType {

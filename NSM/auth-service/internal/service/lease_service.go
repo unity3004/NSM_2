@@ -223,7 +223,7 @@ func (s *LeaseService) Create(ctx context.Context, in CreateLeaseInput) (*Create
 // hasn't reached it yet) — an in-memory-only correction on the returned
 // value, never an extra write on every read; see entity.Lease.IsExpired's
 // own doc comment on why a caller must never trust a stale Active status.
-func (s *LeaseService) Get(ctx context.Context, leaseID string, actor LeaseIdentity) (*entity.Lease, error) {
+func (s *LeaseService) Get(ctx context.Context, leaseID string, actor LeaseIdentity, ipAddress string) (*entity.Lease, error) {
 	lease, err := s.deps.Leases.GetByID(ctx, leaseID)
 	if err != nil {
 		return nil, err
@@ -240,6 +240,7 @@ func (s *LeaseService) Get(ctx context.Context, leaseID string, actor LeaseIdent
 	if lease.Status == entity.LeaseStatusActive && lease.IsExpired(time.Now()) {
 		lease.Status = entity.LeaseStatusExpired
 	}
+	s.recordLeaseAudit(ctx, "lease.read", actor, lease, ipAddress, nil)
 	return lease, nil
 }
 

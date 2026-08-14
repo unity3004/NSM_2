@@ -181,7 +181,7 @@ func (h *userHandler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *userHandler) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("userId")
-	if err := h.svc.DeleteUser(r.Context(), id); err != nil {
+	if err := h.svc.DeleteUser(r.Context(), id, actorUserID(r), clientIP(r)); err != nil {
 		writeServiceError(w, r, err)
 		return
 	}

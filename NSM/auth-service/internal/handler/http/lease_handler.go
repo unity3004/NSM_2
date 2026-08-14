@@ -80,7 +80,7 @@ func (h *leaseHandler) create(w http.ResponseWriter, r *http.Request) {
 // credential (see dto.LeaseResponse's own doc comment).
 func (h *leaseHandler) get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("leaseId")
-	lease, err := h.svc.Get(r.Context(), id, actor(r))
+	lease, err := h.svc.Get(r.Context(), id, actor(r), clientIP(r))
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

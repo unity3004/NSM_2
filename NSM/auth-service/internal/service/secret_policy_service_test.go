@@ -100,6 +100,13 @@ func TestSecretPolicyService_CreatePolicy_Succeeds(t *testing.T) {
 	for _, e := range env.audit.Entries {
 		if e.Action == "policy.created" && e.ResourceID != nil && *e.ResourceID == p.ID {
 			found = true
+			// Audit-logging phase regression test: OrganizationID was
+			// previously never set on any recordPolicyAudit call, making
+			// every policy.* row invisible to AuditService.ListAuditLogs'
+			// own organization-scoped query.
+			if e.OrganizationID == nil || *e.OrganizationID != policyTestOrgID {
+				t.Errorf("policy.created audit OrganizationID = %v, want %q", e.OrganizationID, policyTestOrgID)
+			}
 		}
 	}
 	if !found {

@@ -57,6 +57,12 @@ type AuditLogPage struct {
 	Entries    []*entity.AuditLogEntry
 	NextCursor string
 	HasMore    bool
+	// Counts is the Audit Explorer's own "Total / Successful / Failed /
+	// Denied" summary — computed across every row the caller's filters
+	// match (Cursor/Limit excluded), never just the entries on this one
+	// page. A result value with a zero count is simply absent from this
+	// map, never a zero-valued entry.
+	Counts map[entity.AuditResult]int
 }
 
 // ListAuditLogs is the one place a caller reads audit_logs through this
@@ -88,7 +94,14 @@ func (s *AuditService) ListAuditLogs(ctx context.Context, actorUserID, organizat
 		return AuditLogPage{}, err
 	}
 
-	page := AuditLogPage{}
+	countFilter := filter
+	countFilter.Cursor, countFilter.Limit = nil, 0
+	counts, err := s.repo.CountByResult(ctx, organizationID, countFilter)
+	if err != nil {
+		return AuditLogPage{}, err
+	}
+
+	page := AuditLogPage{Counts: counts}
 	if len(entries) > requestedLimit {
 		page.HasMore = true
 		entries = entries[:requestedLimit]

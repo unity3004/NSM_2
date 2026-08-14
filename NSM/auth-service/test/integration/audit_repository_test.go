@@ -94,6 +94,48 @@ func TestAuditRepository_List_FiltersByAction(t *testing.T) {
 	}
 }
 
+// TestAuditRepository_CountByResult_ReflectsFullFilteredSetAgainstRealDB is
+// the Audit Explorer summary cards' own real-Postgres proof: the grouped
+// COUNT query filters by the same ResourceType marker every other test in
+// this file uses for isolation, and must total every matching row
+// regardless of Limit — a real GROUP BY against the real audit_logs
+// table, not the in-memory fake's own reimplementation of the same logic
+// (see mocks.FakeAuditLogRepository.CountByResult).
+func TestAuditRepository_CountByResult_ReflectsFullFilteredSetAgainstRealDB(t *testing.T) {
+	db := connectForRegisterTest(t)
+	marker := "it-countbyresult-" + t.Name()
+	for range 3 {
+		appendAuditEntry(t, db, &entity.AuditLogEntry{
+			OrganizationID: strPtrForTest(secretTestOrgID), ActorType: entity.AuditActorUser,
+			Action: "secret.read", ResourceType: strPtrForTest(marker), Result: entity.AuditResultSuccess,
+		})
+	}
+	appendAuditEntry(t, db, &entity.AuditLogEntry{
+		OrganizationID: strPtrForTest(secretTestOrgID), ActorType: entity.AuditActorUser,
+		Action: "user.login", ResourceType: strPtrForTest(marker), Result: entity.AuditResultFailure,
+	})
+	appendAuditEntry(t, db, &entity.AuditLogEntry{
+		OrganizationID: strPtrForTest(secretTestOrgID), ActorType: entity.AuditActorUser,
+		Action: "authorization.denied", ResourceType: strPtrForTest(marker), Result: entity.AuditResultDenied,
+	})
+
+	resourceType := marker
+	counts, err := auditReadRepo(db).CountByResult(context.Background(), secretTestOrgID,
+		repository.AuditLogFilter{ResourceType: &resourceType, Limit: 1})
+	if err != nil {
+		t.Fatalf("CountByResult() error = %v", err)
+	}
+	if counts[entity.AuditResultSuccess] != 3 {
+		t.Errorf("counts[success] = %d, want 3 (Limit must not shrink a count)", counts[entity.AuditResultSuccess])
+	}
+	if counts[entity.AuditResultFailure] != 1 {
+		t.Errorf("counts[failure] = %d, want 1", counts[entity.AuditResultFailure])
+	}
+	if counts[entity.AuditResultDenied] != 1 {
+		t.Errorf("counts[denied] = %d, want 1", counts[entity.AuditResultDenied])
+	}
+}
+
 // 3. Time-range filtering — OccurredAfter/OccurredBefore were previously
 // accepted by the filter struct but silently ignored by the SQL; this
 // proves they now actually bound the query.

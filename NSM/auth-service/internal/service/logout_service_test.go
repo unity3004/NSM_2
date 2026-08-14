@@ -35,10 +35,10 @@ func newTestLogoutService(t *testing.T) (*LogoutService, *mocks.FakeSessionRepos
 // --- successful logout ---
 
 func TestLogoutService_Logout_Success(t *testing.T) {
-	svc, sessionRepo, _ := newTestLogoutService(t)
+	svc, sessionRepo, audit := newTestLogoutService(t)
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)})
 
-	if err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 
@@ -55,6 +55,26 @@ func TestLogoutService_Logout_Success(t *testing.T) {
 	if stored.IsActive(time.Now()) {
 		t.Error("a revoked session reports IsActive() = true")
 	}
+
+	// Audit-logging phase regression test: OrganizationID was previously
+	// never set on this event at all, which made every auth.logout row
+	// invisible to AuditService.ListAuditLogs' own organization-scoped
+	// query (WHERE organization_id = $1) — an admin querying their own
+	// org's audit trail would never see a logout, even though the row
+	// genuinely existed. Every other audit write in this codebase already
+	// sets OrganizationID; this closes the one exception.
+	found := false
+	for _, e := range audit.Entries {
+		if e.Action == "auth.logout" {
+			found = true
+			if e.OrganizationID == nil || *e.OrganizationID != "org-1" {
+				t.Errorf("auth.logout audit OrganizationID = %v, want %q", e.OrganizationID, "org-1")
+			}
+		}
+	}
+	if !found {
+		t.Error("no auth.logout audit entry was recorded")
+	}
 }
 
 // --- idempotency ---
@@ -63,10 +83,10 @@ func TestLogoutService_Logout_Idempotent(t *testing.T) {
 	svc, sessionRepo, _ := newTestLogoutService(t)
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)})
 
-	if err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{}); err != nil {
 		t.Fatalf("first Logout() error = %v, want nil", err)
 	}
-	if err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{}); err != nil {
 		t.Errorf("second Logout() on an already-revoked session, error = %v, want nil (idempotent)", err)
 	}
 }
@@ -80,7 +100,7 @@ func TestLogoutService_Logout_CrossUserRejected(t *testing.T) {
 	svc, sessionRepo, _ := newTestLogoutService(t)
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)})
 
-	err := svc.Logout(t.Context(), "user-2", session.ID, LoginMeta{})
+	err := svc.Logout(t.Context(), "org-1", "user-2", session.ID, LoginMeta{})
 	if !errors.Is(err, entity.ErrNotFound) {
 		t.Errorf("Logout() by a different user, error = %v, want entity.ErrNotFound", err)
 	}
@@ -96,7 +116,7 @@ func TestLogoutService_Logout_CrossUserRejected(t *testing.T) {
 
 func TestLogoutService_Logout_NonexistentSession(t *testing.T) {
 	svc, _, _ := newTestLogoutService(t)
-	err := svc.Logout(t.Context(), "user-1", "00000000-0000-4000-8000-000000000000", LoginMeta{})
+	err := svc.Logout(t.Context(), "org-1", "user-1", "00000000-0000-4000-8000-000000000000", LoginMeta{})
 	if !errors.Is(err, entity.ErrNotFound) {
 		t.Errorf("Logout() for a nonexistent session, error = %v, want entity.ErrNotFound", err)
 	}
@@ -107,7 +127,7 @@ func TestLogoutService_Logout_NonexistentSession(t *testing.T) {
 func TestLogoutService_Logout_MissingSessionID(t *testing.T) {
 	svc, _, audit := newTestLogoutService(t)
 
-	err := svc.Logout(t.Context(), "user-1", "", LoginMeta{})
+	err := svc.Logout(t.Context(), "org-1", "user-1", "", LoginMeta{})
 	if !errors.Is(err, ErrMissingSessionIdentity) {
 		t.Errorf("Logout() with no session ID, error = %v, want ErrMissingSessionIdentity", err)
 	}
@@ -125,7 +145,7 @@ func TestLogoutService_Logout_MissingSessionID(t *testing.T) {
 
 func TestLogoutService_Logout_MissingUserID(t *testing.T) {
 	svc, _, _ := newTestLogoutService(t)
-	err := svc.Logout(t.Context(), "", "some-session-id", LoginMeta{})
+	err := svc.Logout(t.Context(), "org-1", "", "some-session-id", LoginMeta{})
 	if !errors.Is(err, ErrMissingSessionIdentity) {
 		t.Errorf("Logout() with no user ID, error = %v, want ErrMissingSessionIdentity", err)
 	}
@@ -139,7 +159,7 @@ func TestLogoutService_Logout_DatabaseFailureIsSafe(t *testing.T) {
 	dbErr := errors.New("simulated database connection error: dial tcp: connect: connection refused")
 	sessionRepo.FailNextRevoke = dbErr
 
-	err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{})
+	err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{})
 	if !errors.Is(err, dbErr) {
 		t.Errorf("Logout() error = %v, want the raw database error propagated, not a false success", err)
 	}
@@ -227,7 +247,7 @@ func TestLogoutService_Logout_PreventsSubsequentRefresh(t *testing.T) {
 		t.Fatalf("Create second refresh token: %v", err)
 	}
 
-	if err := logoutSvc.Logout(t.Context(), "user-1", session.ID, LoginMeta{}); err != nil {
+	if err := logoutSvc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{}); err != nil {
 		t.Fatalf("Logout() error = %v, want nil", err)
 	}
 
@@ -242,7 +262,7 @@ func TestLogoutService_Logout_AuditEventOnSuccess(t *testing.T) {
 	svc, sessionRepo, audit := newTestLogoutService(t)
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)})
 
-	if err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
 		t.Fatalf("Logout() error = %v", err)
 	}
 
@@ -271,7 +291,7 @@ func TestLogoutService_Logout_AuditNeverContainsCredentials(t *testing.T) {
 	svc, sessionRepo, audit := newTestLogoutService(t)
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: "super-secret-hash-value", ExpiresAt: time.Now().Add(time.Hour)})
 
-	if err := svc.Logout(t.Context(), "user-1", session.ID, LoginMeta{}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", "user-1", session.ID, LoginMeta{}); err != nil {
 		t.Fatalf("Logout() error = %v", err)
 	}
 
@@ -302,7 +322,7 @@ func TestLogoutService_Logout_NeverLogsSensitiveValues(t *testing.T) {
 	const secretHash = "super-secret-session-token-hash"
 	session := sessionRepo.Seed(&entity.Session{UserID: "user-1", SessionTokenHash: secretHash, ExpiresAt: time.Now().Add(time.Hour)})
 
-	if err := svc.Logout(ctx, "user-1", session.ID, LoginMeta{}); err != nil {
+	if err := svc.Logout(ctx, "org-1", "user-1", session.ID, LoginMeta{}); err != nil {
 		t.Fatalf("Logout() error = %v", err)
 	}
 

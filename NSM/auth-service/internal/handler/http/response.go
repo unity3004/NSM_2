@@ -141,6 +141,17 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 			"The secret was updated by someone else; the expected version is no longer current.", nil)
 	case errors.Is(err, entity.ErrNotFound):
 		writeErrorEnvelope(w, r, http.StatusNotFound, dto.CodeNotFound, "No such resource.", nil)
+	case errors.Is(err, util.ErrInvalidCursor):
+		// Audit-logging phase: a malformed cursor (garbage base64, or a
+		// SQL-injection-shaped string) reached repository.AuditLogFilter's
+		// Cursor field with no format check ahead of it — ListAuditLogs
+		// found out the hard way, at util.DecodeCursor, several layers
+		// past dto.AuditLogQuery.Validate. The same "a client-supplied
+		// opaque token that fails to decode is a 422, never a 500"
+		// precedent every other cursor-consuming list endpoint in this
+		// codebase already needs but had never actually hit until this
+		// value was deliberately malformed.
+		writeErrorEnvelope(w, r, http.StatusUnprocessableEntity, dto.CodeValidationError, "Invalid pagination cursor.", nil)
 	case errors.Is(err, util.ErrInvalidSecretPath):
 		// Sprint 3 Phase 4: reachable when a path arrives already-invalid
 		// on GET/PUT/DELETE /v1/secrets/{path...} — those routes have no

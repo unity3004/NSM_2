@@ -31,6 +31,15 @@ type AuditLogRepository interface {
 	Append(ctx context.Context, e *entity.AuditLogEntry) error
 	GetByID(ctx context.Context, id string) (*entity.AuditLogEntry, error)
 	List(ctx context.Context, organizationID string, f AuditLogFilter) ([]*entity.AuditLogEntry, error)
+	// CountByResult returns, in one query, how many rows f matches for
+	// each entity.AuditResult value — f.Cursor/f.Limit are ignored (a
+	// count reflects the whole filtered set, never one page of it). Used
+	// by the Audit Explorer's summary cards (Total/Successful/Failed/
+	// Denied); never by anything that also needs the rows themselves —
+	// List is that call, kept as a separate query on purpose rather than
+	// folded into one response, since a cursor-paginated caller almost
+	// never wants a fresh full-set count on every page fetch.
+	CountByResult(ctx context.Context, organizationID string, f AuditLogFilter) (map[entity.AuditResult]int, error)
 	// LatestHash returns the RecordHash of the most recent row for this
 	// organization, so Append can chain the next one — nil/"" if this is
 	// the first entry.

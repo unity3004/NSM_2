@@ -32,7 +32,7 @@ func (h *logoutHandler) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.svc.Logout(r.Context(), identity.Subject, identity.SessionID, service.LoginMeta{
+	err := h.svc.Logout(r.Context(), organizationIDFromRequest(r), identity.Subject, identity.SessionID, service.LoginMeta{
 		IPAddress: clientIP(r),
 		UserAgent: r.UserAgent(),
 	})

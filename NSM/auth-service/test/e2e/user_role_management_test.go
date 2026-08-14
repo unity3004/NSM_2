@@ -318,8 +318,22 @@ func TestUserManagement_FullLifecycle(t *testing.T) {
 		t.Fatalf("login after re-enable: got %d; body=%s", reenabledLoginRes.StatusCode, reenabledLoginBody)
 	}
 
+	// TEST 10 (audit logging phase): DeleteUser previously produced no
+	// audit trail at all for a real, wired DELETE /v1/users/{id} endpoint —
+	// the one lifecycle transition in this flow that had none. Runs last:
+	// SoftDelete only sets deleted_at (see userRepository.SoftDelete), the
+	// row and its password_hash stay queryable for TEST 12/13 below.
+	deleteReq, _ := http.NewRequest(http.MethodDelete, env.Server.URL+"/v1/users/"+created.ID, nil)
+	for k, v := range authHeaders(adminToken) {
+		deleteReq.Header.Set(k, v)
+	}
+	deleteRes, deleteBody := doRequest(t, client, deleteReq)
+	if deleteRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete user: got %d; body=%s", deleteRes.StatusCode, deleteBody)
+	}
+
 	// TEST 11: audit events for every step above.
-	for _, action := range []string{"user.created", "user.disabled", "user.enabled", "role.assigned", "role.removed"} {
+	for _, action := range []string{"user.created", "user.disabled", "user.enabled", "user.deleted", "role.assigned", "role.removed"} {
 		var n int
 		if err := env.DB.QueryRowContext(context.Background(),
 			`SELECT count(*) FROM audit_logs WHERE action = $1 AND resource_id = $2`, action, created.ID,

@@ -306,12 +306,45 @@ func TestLeaseService_Get_OwnerCanReadOwnLease(t *testing.T) {
 	env := newTestLeaseEnv(t)
 	result := env.createLease(t, leaseOwner(), 5*time.Minute, false)
 
-	got, err := env.svc.Get(t.Context(), result.Lease.ID, leaseOwner())
+	got, err := env.svc.Get(t.Context(), result.Lease.ID, leaseOwner(), "203.0.113.10")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	if got.ID != result.Lease.ID {
 		t.Errorf("Get() ID = %q, want %q", got.ID, result.Lease.ID)
+	}
+}
+
+// TestLeaseService_Get_RecordsLeaseReadAudit is the audit-logging phase's
+// own addition: reading a lease's metadata is itself a security-relevant
+// event (per the objective's own minimum event list), so it gets a
+// first-class "lease.read" row alongside the existing lease.created/
+// renewed/revoked/expired events — never the credential itself, which
+// Get never returns in the first place (see LeaseResponse's own doc
+// comment on why Credential only ever appears on POST /v1/leases).
+func TestLeaseService_Get_RecordsLeaseReadAudit(t *testing.T) {
+	env := newTestLeaseEnv(t)
+	result := env.createLease(t, leaseOwner(), 5*time.Minute, false)
+	env.audit.Entries = nil // isolate this test from the lease.created event Create already wrote
+
+	if _, err := env.svc.Get(t.Context(), result.Lease.ID, leaseOwner(), "203.0.113.10"); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	found := false
+	for _, e := range env.audit.Entries {
+		if e.Action == "lease.read" {
+			found = true
+			if e.ResourceID == nil || *e.ResourceID != result.Lease.ID {
+				t.Errorf("lease.read audit ResourceID = %v, want %q", e.ResourceID, result.Lease.ID)
+			}
+			if e.Result != entity.AuditResultSuccess {
+				t.Errorf("lease.read audit Result = %q, want success", e.Result)
+			}
+		}
+	}
+	if !found {
+		t.Error("no lease.read audit entry was recorded")
 	}
 }
 
@@ -324,7 +357,7 @@ func TestLeaseService_Get_CrossUserAccessDenied(t *testing.T) {
 	env := newTestLeaseEnv(t)
 	result := env.createLease(t, leaseOwner(), 5*time.Minute, false)
 
-	_, err := env.svc.Get(t.Context(), result.Lease.ID, LeaseIdentity{Type: entity.LeaseOwnerUser, ID: leaseOtherUserID})
+	_, err := env.svc.Get(t.Context(), result.Lease.ID, LeaseIdentity{Type: entity.LeaseOwnerUser, ID: leaseOtherUserID}, "203.0.113.10")
 	if !errors.Is(err, entity.ErrNotFound) {
 		t.Errorf("Get() by a non-owner without leases:read, error = %v, want ErrNotFound", err)
 	}
@@ -335,7 +368,7 @@ func TestLeaseService_Get_AdministratorWithLeasesReadCanReadAnyLease(t *testing.
 	result := env.createLease(t, leaseOwner(), 5*time.Minute, false)
 	env.rbac.Grant(leaseAdminID, permLeasesRead)
 
-	got, err := env.svc.Get(t.Context(), result.Lease.ID, LeaseIdentity{Type: entity.LeaseOwnerUser, ID: leaseAdminID})
+	got, err := env.svc.Get(t.Context(), result.Lease.ID, LeaseIdentity{Type: entity.LeaseOwnerUser, ID: leaseAdminID}, "203.0.113.10")
 	if err != nil {
 		t.Fatalf("Get() by an administrator holding leases:read, error = %v", err)
 	}
@@ -346,7 +379,7 @@ func TestLeaseService_Get_AdministratorWithLeasesReadCanReadAnyLease(t *testing.
 
 func TestLeaseService_Get_UnknownLeaseIDReportsNotFound(t *testing.T) {
 	env := newTestLeaseEnv(t)
-	_, err := env.svc.Get(t.Context(), "lease-does-not-exist", leaseOwner())
+	_, err := env.svc.Get(t.Context(), "lease-does-not-exist", leaseOwner(), "203.0.113.10")
 	if !errors.Is(err, entity.ErrNotFound) {
 		t.Errorf("Get() for an unknown lease ID, error = %v, want ErrNotFound", err)
 	}
@@ -366,7 +399,7 @@ func TestLeaseService_Get_ExpiredLeaseReflectsExpiredStatusEvenBeforeCleanupRuns
 		Status: entity.LeaseStatusActive, ExpiresAt: time.Now().Add(-time.Minute),
 	})
 
-	got, err := env.svc.Get(t.Context(), seeded.ID, leaseOwner())
+	got, err := env.svc.Get(t.Context(), seeded.ID, leaseOwner(), "203.0.113.10")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}

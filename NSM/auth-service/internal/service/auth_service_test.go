@@ -396,7 +396,7 @@ func TestLogout_RecordsAuditEventOnSuccess(t *testing.T) {
 	}
 	audit.Entries = nil // Login already wrote its own audit row; isolate Logout's.
 
-	if err := svc.Logout(t.Context(), u.ID, result.SessionID, &result.RefreshToken, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
+	if err := svc.Logout(t.Context(), "org-1", u.ID, result.SessionID, &result.RefreshToken, LoginMeta{IPAddress: "203.0.113.42"}); err != nil {
 		t.Fatalf("Logout() error = %v", err)
 	}
 
@@ -415,6 +415,14 @@ func TestLogout_RecordsAuditEventOnSuccess(t *testing.T) {
 	}
 	if entry.ResourceID == nil || *entry.ResourceID != result.SessionID {
 		t.Errorf("audit resource_id = %v, want %q", entry.ResourceID, result.SessionID)
+	}
+	// Audit-logging phase regression test: OrganizationID was previously
+	// never set here, making every auth.logout row invisible to
+	// AuditService.ListAuditLogs' own organization-scoped query — see
+	// TestLogoutService_Logout_Success's identical assertion for the
+	// Milestone 6B logout path this bug also affected.
+	if entry.OrganizationID == nil || *entry.OrganizationID != "org-1" {
+		t.Errorf("audit organization_id = %v, want %q", entry.OrganizationID, "org-1")
 	}
 	for k, v := range entry.Metadata {
 		if s, ok := v.(string); ok && strings.Contains(s, result.RefreshToken) {
@@ -437,7 +445,7 @@ func TestLogout_RecordsAuditEventOnFailure(t *testing.T) {
 	audit.Entries = nil
 
 	const bogusSessionID = "00000000-0000-4000-8000-000000000000"
-	if err := svc.Logout(t.Context(), u.ID, bogusSessionID, &result.RefreshToken, LoginMeta{}); err == nil {
+	if err := svc.Logout(t.Context(), "org-1", u.ID, bogusSessionID, &result.RefreshToken, LoginMeta{}); err == nil {
 		t.Fatal("Logout() with a nonexistent session ID = nil error, want one")
 	}
 

@@ -93,7 +93,9 @@ func TestRequirePermission_Denied_RecordsAuthorizationDeniedEvent(t *testing.T) 
 
 	handler := RequirePermission(rbac, auditTx, "users:create")(allowHandler())
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, requestWithClaims("user-1"))
+	req := requestWithClaims("user-1")
+	req.Header.Set("X-Organization-Id", "org-1")
+	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -116,6 +118,15 @@ func TestRequirePermission_Denied_RecordsAuthorizationDeniedEvent(t *testing.T) 
 		}
 		if perm, _ := e.Metadata["permission"].(string); perm != "users:create" {
 			t.Errorf("Metadata[permission] = %v, want %q", e.Metadata["permission"], "users:create")
+		}
+		// Audit-logging phase regression test: OrganizationID was
+		// previously never set here at all, making every
+		// authorization.denied row invisible to AuditService.ListAuditLogs'
+		// own organization-scoped query (WHERE organization_id = $1) — an
+		// admin querying their own org's audit trail would never see a
+		// denial, even though the row genuinely existed.
+		if e.OrganizationID == nil || *e.OrganizationID != "org-1" {
+			t.Errorf("OrganizationID = %v, want %q", e.OrganizationID, "org-1")
 		}
 	}
 	if !found {

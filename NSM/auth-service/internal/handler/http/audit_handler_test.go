@@ -157,7 +157,7 @@ func TestAuditHandler_ParseAuditLogQuery_DefaultLimit(t *testing.T) {
 }
 
 func TestAuditHandler_ParseAuditLogQuery_AllFilters(t *testing.T) {
-	req := auditListRequest("actor_type=user&actor_id=user-1&action=secret.read&resource_type=secret&resource_id=prod%2Fdb&result=denied&request_id=req-1&cursor=abc&limit=5")
+	req := auditListRequest("actor_type=user&actor_id=11111111-1111-4111-8111-111111111111&action=secret.read&resource_type=secret&resource_id=prod%2Fdb&result=denied&request_id=req-1&cursor=abc&limit=5")
 	query, errs := parseAuditLogQuery(req)
 	if err := errs.Err(); err != nil {
 		t.Fatalf("parseAuditLogQuery() unexpected error = %v", err)
@@ -165,8 +165,8 @@ func TestAuditHandler_ParseAuditLogQuery_AllFilters(t *testing.T) {
 	if query.ActorType == nil || *query.ActorType != "user" {
 		t.Errorf("ActorType = %v, want %q", query.ActorType, "user")
 	}
-	if query.ActorID == nil || *query.ActorID != "user-1" {
-		t.Errorf("ActorID = %v, want %q", query.ActorID, "user-1")
+	if query.ActorID == nil || *query.ActorID != "11111111-1111-4111-8111-111111111111" {
+		t.Errorf("ActorID = %v, want %q", query.ActorID, "11111111-1111-4111-8111-111111111111")
 	}
 	if query.Action == nil || *query.Action != "secret.read" {
 		t.Errorf("Action = %v, want %q", query.Action, "secret.read")

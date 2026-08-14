@@ -85,7 +85,7 @@ func RequirePermission(rbac *service.RBACService, auditTx service.AuditTxFunc, p
 			if !allowed {
 				logging.FromContext(r.Context()).Debug("access denied",
 					zap.String("user_id", claims.Subject), zap.String("permission", permission))
-				recordAuthorizationDenied(r.Context(), auditTx, claims.Subject, claims.IsServiceAccount(), permission, r)
+				recordAuthorizationDenied(r.Context(), auditTx, claims.Subject, claims.IsServiceAccount(), permission, r, organizationIDMW(r))
 				writeErrorEnvelopeMiddleware(w, r, http.StatusForbidden, dto.CodeForbidden, "You do not have permission to perform this action.")
 				return
 			}
@@ -106,7 +106,7 @@ func RequirePermission(rbac *service.RBACService, auditTx service.AuditTxFunc, p
 // that costs nothing extra to capture here. Metadata carries the full
 // permission string and HTTP method — never anything from the request
 // body, which this middleware never reads.
-func recordAuthorizationDenied(ctx context.Context, auditTx service.AuditTxFunc, actorID string, isServiceAccount bool, permission string, r *http.Request) {
+func recordAuthorizationDenied(ctx context.Context, auditTx service.AuditTxFunc, actorID string, isServiceAccount bool, permission string, r *http.Request, organizationID string) {
 	if auditTx == nil {
 		return
 	}
@@ -127,21 +127,31 @@ func recordAuthorizationDenied(ctx context.Context, auditTx service.AuditTxFunc,
 
 	err := auditTx(ctx, func(audit repository.AuditLogRepository) error {
 		return audit.Append(ctx, &entity.AuditLogEntry{
-			ActorType:    actorType,
-			ActorID:      &actor,
-			Action:       "authorization.denied",
-			ResourceType: &resource,
-			ResourceID:   &path,
-			Result:       entity.AuditResultDenied,
-			IPAddress:    strPtrOrNil(ip),
-			RequestID:    strPtrOrNil(requestID),
-			Metadata:     map[string]any{"permission": permission, "method": r.Method},
+			OrganizationID: strPtrOrNil(organizationID),
+			ActorType:      actorType,
+			ActorID:        &actor,
+			Action:         "authorization.denied",
+			ResourceType:   &resource,
+			ResourceID:     &path,
+			Result:         entity.AuditResultDenied,
+			IPAddress:      strPtrOrNil(ip),
+			RequestID:      strPtrOrNil(requestID),
+			Metadata:       map[string]any{"permission": permission, "method": r.Method},
 		})
 	})
 	if err != nil {
 		logging.FromContext(ctx).Error("failed to record authorization.denied audit event",
 			zap.String("permission", permission), zap.Error(err))
 	}
+}
+
+// organizationIDMW mirrors handler/http/auth_handler.go's
+// organizationIDFromRequest — see clientIPMW's own doc comment just below
+// for why this package keeps a small, local duplicate of that one-liner
+// rather than importing internal/handler/http (which already imports this
+// package, so the reverse dependency would be a cycle).
+func organizationIDMW(r *http.Request) string {
+	return r.Header.Get("X-Organization-Id")
 }
 
 // clientIPMW mirrors handler/http/auth_handler.go's clientIP — both now

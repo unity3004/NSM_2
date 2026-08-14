@@ -558,34 +558,7 @@ func (f *FakeAuditLogRepository) List(_ context.Context, organizationID string, 
 
 	var out []*entity.AuditLogEntry
 	for _, e := range ordered[startIdx:] {
-		if e.OrganizationID == nil || *e.OrganizationID != organizationID {
-			continue
-		}
-		if filter.ActorType != nil && e.ActorType != *filter.ActorType {
-			continue
-		}
-		if filter.ActorID != nil && (e.ActorID == nil || *e.ActorID != *filter.ActorID) {
-			continue
-		}
-		if filter.Action != nil && e.Action != *filter.Action {
-			continue
-		}
-		if filter.ResourceType != nil && (e.ResourceType == nil || *e.ResourceType != *filter.ResourceType) {
-			continue
-		}
-		if filter.ResourceID != nil && (e.ResourceID == nil || *e.ResourceID != *filter.ResourceID) {
-			continue
-		}
-		if filter.Result != nil && e.Result != *filter.Result {
-			continue
-		}
-		if filter.RequestID != nil && (e.RequestID == nil || *e.RequestID != *filter.RequestID) {
-			continue
-		}
-		if filter.OccurredAfter != nil && e.OccurredAt.Before(*filter.OccurredAfter) {
-			continue
-		}
-		if filter.OccurredBefore != nil && !e.OccurredAt.Before(*filter.OccurredBefore) {
+		if !auditEntryMatchesFilter(e, organizationID, filter) {
 			continue
 		}
 		out = append(out, e)
@@ -594,6 +567,57 @@ func (f *FakeAuditLogRepository) List(_ context.Context, organizationID string, 
 		}
 	}
 	return out, nil
+}
+
+// auditEntryMatchesFilter is List's own per-entry predicate, factored out
+// so CountByResult below can apply the identical filter (everything
+// except Cursor/Limit, which List alone applies) without drifting out of
+// sync with it.
+func auditEntryMatchesFilter(e *entity.AuditLogEntry, organizationID string, filter repository.AuditLogFilter) bool {
+	if e.OrganizationID == nil || *e.OrganizationID != organizationID {
+		return false
+	}
+	if filter.ActorType != nil && e.ActorType != *filter.ActorType {
+		return false
+	}
+	if filter.ActorID != nil && (e.ActorID == nil || *e.ActorID != *filter.ActorID) {
+		return false
+	}
+	if filter.Action != nil && e.Action != *filter.Action {
+		return false
+	}
+	if filter.ResourceType != nil && (e.ResourceType == nil || *e.ResourceType != *filter.ResourceType) {
+		return false
+	}
+	if filter.ResourceID != nil && (e.ResourceID == nil || *e.ResourceID != *filter.ResourceID) {
+		return false
+	}
+	if filter.Result != nil && e.Result != *filter.Result {
+		return false
+	}
+	if filter.RequestID != nil && (e.RequestID == nil || *e.RequestID != *filter.RequestID) {
+		return false
+	}
+	if filter.OccurredAfter != nil && e.OccurredAt.Before(*filter.OccurredAfter) {
+		return false
+	}
+	if filter.OccurredBefore != nil && !e.OccurredAt.Before(*filter.OccurredBefore) {
+		return false
+	}
+	return true
+}
+
+func (f *FakeAuditLogRepository) CountByResult(_ context.Context, organizationID string, filter repository.AuditLogFilter) (map[entity.AuditResult]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	counts := make(map[entity.AuditResult]int, 3)
+	for _, e := range f.Entries {
+		if auditEntryMatchesFilter(e, organizationID, filter) {
+			counts[e.Result]++
+		}
+	}
+	return counts, nil
 }
 
 func (f *FakeAuditLogRepository) LatestHash(_ context.Context, _ string) (string, error) {

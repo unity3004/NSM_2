@@ -142,12 +142,16 @@ func (r *auditLogRepository) GetByID(ctx context.Context, id string) (*entity.Au
 //
 // limit is clamped to (0, 100] the same way it always was — never treated
 // as "no limit," even from a caller that forgets to set it.
-func (r *auditLogRepository) List(ctx context.Context, organizationID string, f repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	query := `SELECT ` + auditLogColumns + ` FROM audit_logs WHERE organization_id = $1`
+// whereClauseForFilter builds the shared, always-parameterized WHERE
+// clause both List and CountByResult filter against — every
+// AuditLogFilter field except Cursor/Limit, which are pagination
+// concerns List alone applies (a count must reflect the whole filtered
+// set, never one page of it). Returns the clause starting with "WHERE
+// organization_id = $1" and the args slice so far, so each caller can
+// append its own remaining placeholders (Cursor for List; nothing
+// further for CountByResult) at the correct $N position.
+func whereClauseForFilter(organizationID string, f repository.AuditLogFilter) (string, []any) {
+	query := `WHERE organization_id = $1`
 	args := []any{organizationID}
 	if f.ActorType != nil {
 		args = append(args, *f.ActorType)
@@ -185,6 +189,16 @@ func (r *auditLogRepository) List(ctx context.Context, organizationID string, f 
 		args = append(args, f.OccurredBefore.UTC())
 		query += placeholder(" AND occurred_at < $", len(args))
 	}
+	return query, args
+}
+
+func (r *auditLogRepository) List(ctx context.Context, organizationID string, f repository.AuditLogFilter) ([]*entity.AuditLogEntry, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	where, args := whereClauseForFilter(organizationID, f)
+	query := `SELECT ` + auditLogColumns + ` FROM audit_logs ` + where
 	if f.Cursor != nil && *f.Cursor != "" {
 		cursorTime, cursorID, err := util.DecodeCursor(*f.Cursor)
 		if err != nil {
@@ -214,6 +228,38 @@ func (r *auditLogRepository) List(ctx context.Context, organizationID string, f 
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// CountByResult returns, in one grouped query, how many rows the given
+// filter matches for each entity.AuditResult value — the Audit Explorer
+// UI's own "Total / Successful / Failed / Denied" summary cards
+// (objective's own requirement) need real, server-computed totals across
+// the *entire* filtered set, never a client-side tally of whatever page
+// happens to be loaded, which is what "Do not perform SELECT * FROM
+// audit_events without pagination" and "Avoid N+1 queries" both rule
+// out here: Cursor/Limit are deliberately never applied to this query
+// (see whereClauseForFilter's own doc comment), and it is exactly one
+// round trip regardless of how many result values exist.
+func (r *auditLogRepository) CountByResult(ctx context.Context, organizationID string, f repository.AuditLogFilter) (map[entity.AuditResult]int, error) {
+	where, args := whereClauseForFilter(organizationID, f)
+	query := `SELECT result, count(*) FROM audit_logs ` + where + ` GROUP BY result`
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[entity.AuditResult]int, 3)
+	for rows.Next() {
+		var result entity.AuditResult
+		var n int
+		if err := rows.Scan(&result, &n); err != nil {
+			return nil, err
+		}
+		counts[result] = n
+	}
+	return counts, rows.Err()
 }
 
 func (r *auditLogRepository) LatestHash(ctx context.Context, organizationID string) (string, error) {

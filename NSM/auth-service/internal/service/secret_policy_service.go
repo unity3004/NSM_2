@@ -175,7 +175,7 @@ func (s *SecretPolicyService) CreatePolicy(ctx context.Context, in CreatePolicyI
 		return nil, err
 	}
 
-	s.recordPolicyAudit(ctx, "policy.created", in.ActorUserID, policyEntity.ID, in.IPAddress,
+	s.recordPolicyAudit(ctx, "policy.created", in.ActorUserID, policyEntity.ID, in.IPAddress, policyEntity.OrganizationID,
 		map[string]any{"name": in.Name, "rule_count": len(rules)})
 	return policyEntity, nil
 }
@@ -258,7 +258,7 @@ func (s *SecretPolicyService) UpdatePolicy(ctx context.Context, in UpdatePolicyI
 		ruleCount = len(rules)
 	}
 
-	s.recordPolicyAudit(ctx, "policy.updated", in.ActorUserID, p.ID, in.IPAddress,
+	s.recordPolicyAudit(ctx, "policy.updated", in.ActorUserID, p.ID, in.IPAddress, p.OrganizationID,
 		map[string]any{"name": p.Name, "rules_replaced": ruleCount >= 0, "rule_count": ruleCount})
 	return p, nil
 }
@@ -278,7 +278,7 @@ func (s *SecretPolicyService) DeletePolicy(ctx context.Context, actorUserID, pol
 	if err := s.repo.Delete(ctx, policyID); err != nil {
 		return err
 	}
-	s.recordPolicyAudit(ctx, "policy.deleted", actorUserID, policyID, ipAddress, map[string]any{"name": p.Name})
+	s.recordPolicyAudit(ctx, "policy.deleted", actorUserID, policyID, ipAddress, p.OrganizationID, map[string]any{"name": p.Name})
 	return nil
 }
 
@@ -286,11 +286,18 @@ func (s *SecretPolicyService) AssignToRole(ctx context.Context, actorUserID, pol
 	if err := s.authorize(ctx, actorUserID, permSecretPoliciesAssign); err != nil {
 		return err
 	}
+	// Fetched only for its OrganizationID (see recordPolicyAudit's own
+	// OrganizationID parameter) — the same "resolve the org before
+	// writing the audit entry" step Update/DeletePolicy already take.
+	p, err := s.repo.GetByID(ctx, policyID)
+	if err != nil {
+		return err
+	}
 	actor := actorUserID
 	if err := s.repo.AssignToRole(ctx, &entity.SecretPolicyRoleAssignment{PolicyID: policyID, RoleID: roleID, AssignedBy: &actor}); err != nil {
 		return err
 	}
-	s.recordPolicyAudit(ctx, "policy.assigned", actorUserID, policyID, ipAddress, map[string]any{"role_id": roleID})
+	s.recordPolicyAudit(ctx, "policy.assigned", actorUserID, policyID, ipAddress, p.OrganizationID, map[string]any{"role_id": roleID})
 	return nil
 }
 
@@ -298,10 +305,14 @@ func (s *SecretPolicyService) UnassignFromRole(ctx context.Context, actorUserID,
 	if err := s.authorize(ctx, actorUserID, permSecretPoliciesAssign); err != nil {
 		return err
 	}
+	p, err := s.repo.GetByID(ctx, policyID)
+	if err != nil {
+		return err
+	}
 	if err := s.repo.UnassignFromRole(ctx, policyID, roleID); err != nil {
 		return err
 	}
-	s.recordPolicyAudit(ctx, "policy.unassigned", actorUserID, policyID, ipAddress, map[string]any{"role_id": roleID})
+	s.recordPolicyAudit(ctx, "policy.unassigned", actorUserID, policyID, ipAddress, p.OrganizationID, map[string]any{"role_id": roleID})
 	return nil
 }
 
@@ -435,7 +446,7 @@ func (s *SecretPolicyService) authorize(ctx context.Context, actorUserID, permis
 // can reach what, not a secret value or key material — safe to sit in
 // audit_logs indefinitely, the same way secret *paths* (not values)
 // already do in SecretService's own audit entries.
-func (s *SecretPolicyService) recordPolicyAudit(ctx context.Context, action, actorUserID, policyID, ipAddress string, metadata map[string]any) {
+func (s *SecretPolicyService) recordPolicyAudit(ctx context.Context, action, actorUserID, policyID, ipAddress string, organizationID *string, metadata map[string]any) {
 	if s.auditTx == nil {
 		return
 	}
@@ -445,15 +456,16 @@ func (s *SecretPolicyService) recordPolicyAudit(ctx context.Context, action, act
 	}
 	err := s.auditTx(ctx, func(audit repository.AuditLogRepository) error {
 		return audit.Append(ctx, &entity.AuditLogEntry{
-			ActorType:    entity.AuditActorUser,
-			ActorID:      actorID,
-			Action:       action,
-			ResourceType: strPtr("secret_policy"),
-			ResourceID:   strPtr(policyID),
-			Result:       entity.AuditResultSuccess,
-			IPAddress:    strPtr(ipAddress),
-			RequestID:    strPtr(util.RequestIDFromContext(ctx)),
-			Metadata:     metadata,
+			OrganizationID: organizationID,
+			ActorType:      entity.AuditActorUser,
+			ActorID:        actorID,
+			Action:         action,
+			ResourceType:   strPtr("secret_policy"),
+			ResourceID:     strPtr(policyID),
+			Result:         entity.AuditResultSuccess,
+			IPAddress:      strPtr(ipAddress),
+			RequestID:      strPtr(util.RequestIDFromContext(ctx)),
+			Metadata:       metadata,
 		})
 	})
 	if err != nil {

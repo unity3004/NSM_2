@@ -55,9 +55,19 @@ func (h *auditHandler) list(w http.ResponseWriter, r *http.Request) {
 		nextCursor = &page.NextCursor
 	}
 	writeJSON(w, r, http.StatusOK, struct {
-		Data []dto.AuditLogResponse `json:"data"`
-		Page dto.PageMeta           `json:"page"`
-	}{Data: out, Page: dto.PageMeta{NextCursor: nextCursor, HasMore: page.HasMore, Limit: query.Limit}})
+		Data    []dto.AuditLogResponse `json:"data"`
+		Page    dto.PageMeta           `json:"page"`
+		Summary dto.AuditLogSummary    `json:"summary"`
+	}{
+		Data: out,
+		Page: dto.PageMeta{NextCursor: nextCursor, HasMore: page.HasMore, Limit: query.Limit},
+		Summary: dto.AuditLogSummary{
+			Total:   page.Counts[entity.AuditResultSuccess] + page.Counts[entity.AuditResultFailure] + page.Counts[entity.AuditResultDenied],
+			Success: page.Counts[entity.AuditResultSuccess],
+			Failure: page.Counts[entity.AuditResultFailure],
+			Denied:  page.Counts[entity.AuditResultDenied],
+		},
+	})
 }
 
 // parseAuditLogQuery reads GET /v1/audit-logs' query string into a

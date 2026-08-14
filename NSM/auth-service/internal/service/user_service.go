@@ -105,8 +105,12 @@ func (s *UserService) UpdateUser(ctx context.Context, u *entity.User) error {
 	return s.users.Update(ctx, u)
 }
 
-func (s *UserService) DeleteUser(ctx context.Context, id string) error {
-	return s.users.SoftDelete(ctx, id)
+func (s *UserService) DeleteUser(ctx context.Context, id, actorUserID, ipAddress string) error {
+	if err := s.users.SoftDelete(ctx, id); err != nil {
+		return err
+	}
+	s.recordUserAudit(ctx, "user.deleted", actorUserID, id, ipAddress, nil)
+	return nil
 }
 
 // DisableUser sets status to Disabled and revokes every one of the

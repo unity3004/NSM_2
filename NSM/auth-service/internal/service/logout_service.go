@@ -67,10 +67,10 @@ func NewLogoutService(deps LogoutServiceDeps) *LogoutService {
 // here is what invalidates every refresh token tied to it, through
 // session state, not through a second write this method would otherwise
 // need to keep transactionally consistent with the first.
-func (s *LogoutService) Logout(ctx context.Context, callerUserID, sessionID string, meta LoginMeta) error {
+func (s *LogoutService) Logout(ctx context.Context, organizationID, callerUserID, sessionID string, meta LoginMeta) error {
 	var logoutErr error
 	defer func() {
-		s.recordLogoutAudit(ctx, callerUserID, sessionID, logoutErr, meta)
+		s.recordLogoutAudit(ctx, organizationID, callerUserID, sessionID, logoutErr, meta)
 	}()
 
 	if callerUserID == "" || sessionID == "" {
@@ -95,7 +95,7 @@ func (s *LogoutService) Logout(ctx context.Context, callerUserID, sessionID stri
 // a failure reason string on failure. A failure here is logged and
 // swallowed, never surfaced to the caller, the same convention every
 // other audit write in this codebase already follows.
-func (s *LogoutService) recordLogoutAudit(ctx context.Context, userID, sessionID string, logoutErr error, meta LoginMeta) {
+func (s *LogoutService) recordLogoutAudit(ctx context.Context, organizationID, userID, sessionID string, logoutErr error, meta LoginMeta) {
 	if s.deps.AuditTx == nil {
 		return
 	}
@@ -116,15 +116,16 @@ func (s *LogoutService) recordLogoutAudit(ctx context.Context, userID, sessionID
 	}
 
 	audit := &entity.AuditLogEntry{
-		ActorType:    entity.AuditActorUser,
-		ActorID:      actorID,
-		Action:       "auth.logout",
-		ResourceType: strPtr("session"),
-		ResourceID:   resourceID,
-		Result:       result,
-		IPAddress:    strPtr(meta.IPAddress),
-		RequestID:    strPtr(util.RequestIDFromContext(ctx)),
-		Metadata:     metadata,
+		OrganizationID: strPtr(organizationID),
+		ActorType:      entity.AuditActorUser,
+		ActorID:        actorID,
+		Action:         "auth.logout",
+		ResourceType:   strPtr("session"),
+		ResourceID:     resourceID,
+		Result:         result,
+		IPAddress:      strPtr(meta.IPAddress),
+		RequestID:      strPtr(util.RequestIDFromContext(ctx)),
+		Metadata:       metadata,
 	}
 	err := s.deps.AuditTx(ctx, func(repo repository.AuditLogRepository) error {
 		return repo.Append(ctx, audit)

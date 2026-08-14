@@ -95,6 +95,39 @@ func TestAuditService_ListAuditLogs_AdminCanList(t *testing.T) {
 	}
 }
 
+// TestAuditService_ListAuditLogs_CountsReflectFullFilteredSetNotOnePage
+// is the Audit Explorer summary cards' own regression test: Counts must
+// total every matching row, not just the one page Entries returns — the
+// whole reason CountByResult is a separate, unpaginated query rather
+// than a client-side tally of Entries (see AuditLogPage.Counts' own doc
+// comment).
+func TestAuditService_ListAuditLogs_CountsReflectFullFilteredSetNotOnePage(t *testing.T) {
+	env := newTestAuditEnv(t)
+	now := time.Now()
+	seedAuditEntry(t, env, "secret.read", entity.AuditResultSuccess, now)
+	seedAuditEntry(t, env, "secret.read", entity.AuditResultSuccess, now.Add(-time.Minute))
+	seedAuditEntry(t, env, "secret.read", entity.AuditResultSuccess, now.Add(-2*time.Minute))
+	seedAuditEntry(t, env, "user.login", entity.AuditResultFailure, now.Add(-3*time.Minute))
+	seedAuditEntry(t, env, "authorization.denied", entity.AuditResultDenied, now.Add(-4*time.Minute))
+
+	page, err := env.svc.ListAuditLogs(t.Context(), auditAdminID, auditTestOrgID, repository.AuditLogFilter{Limit: 2}, "203.0.113.10")
+	if err != nil {
+		t.Fatalf("ListAuditLogs() error = %v", err)
+	}
+	if len(page.Entries) != 2 {
+		t.Fatalf("Entries = %d, want exactly 2 (the requested page size)", len(page.Entries))
+	}
+	if page.Counts[entity.AuditResultSuccess] != 3 {
+		t.Errorf("Counts[success] = %d, want 3 (all matching rows, not just this page)", page.Counts[entity.AuditResultSuccess])
+	}
+	if page.Counts[entity.AuditResultFailure] != 1 {
+		t.Errorf("Counts[failure] = %d, want 1", page.Counts[entity.AuditResultFailure])
+	}
+	if page.Counts[entity.AuditResultDenied] != 1 {
+		t.Errorf("Counts[denied] = %d, want 1", page.Counts[entity.AuditResultDenied])
+	}
+}
+
 // --- 10 (objective's own list): audit access is itself audited ---
 
 func TestAuditService_ListAuditLogs_RecordsAdminAuditRead(t *testing.T) {
