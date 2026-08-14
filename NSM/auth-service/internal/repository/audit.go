@@ -61,7 +61,13 @@ type AuditLogFilter struct {
 	ActorID        *string
 	Action         *string
 	ResourceType   *string
-	ResourceID     *string
+	// ResourceID matches a row's own opaque resource_id (a secret/lease's
+	// UUID, say) OR the human-readable path recorded in that row's own
+	// Metadata (SecretService writes "path", LeaseService writes
+	// "resource_path" — see postgres.whereClauseForFilter's own doc
+	// comment) — so a caller searching by the path they actually know
+	// finds the row, not just a caller who already has the opaque ID.
+	ResourceID *string
 	Result         *entity.AuditResult
 	RequestID      *string
 	OccurredAfter  *time.Time

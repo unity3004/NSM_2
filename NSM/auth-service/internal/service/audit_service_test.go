@@ -245,6 +245,85 @@ func TestAuditService_ListAuditLogs_FiltersByAction(t *testing.T) {
 	}
 }
 
+// TestAuditService_ListAuditLogs_ResourceIDFilterAlsoMatchesMetadataPath is
+// the "search by resource ID/path" regression test: a secret/lease audit
+// row's own resource_id is an opaque UUID, never the human-readable path
+// an operator actually knows and searches for — that only lives in
+// Metadata["path"] (secrets) or Metadata["resource_path"] (leases). The
+// filter must match either, not just the opaque ID, or a path search
+// silently returns nothing even though a matching row genuinely exists.
+func TestAuditService_ListAuditLogs_ResourceIDFilterAlsoMatchesMetadataPath(t *testing.T) {
+	env := newTestAuditEnv(t)
+	secretEvent := &entity.AuditLogEntry{
+		OrganizationID: strPtr(auditTestOrgID),
+		ActorType:      entity.AuditActorUser,
+		Action:         "secret.created",
+		ResourceType:   strPtr("secret"),
+		ResourceID:     strPtr("11111111-1111-1111-1111-111111111111"),
+		Result:         entity.AuditResultSuccess,
+		Metadata:       map[string]any{"path": "prod/db/password"},
+	}
+	if err := env.repo.Append(t.Context(), secretEvent); err != nil {
+		t.Fatalf("seed secret event: %v", err)
+	}
+	leaseEvent := &entity.AuditLogEntry{
+		OrganizationID: strPtr(auditTestOrgID),
+		ActorType:      entity.AuditActorUser,
+		Action:         "lease.created",
+		ResourceType:   strPtr("lease"),
+		ResourceID:     strPtr("22222222-2222-2222-2222-222222222222"),
+		Result:         entity.AuditResultSuccess,
+		Metadata:       map[string]any{"resource_path": "infra/postgres/demo"},
+	}
+	if err := env.repo.Append(t.Context(), leaseEvent); err != nil {
+		t.Fatalf("seed lease event: %v", err)
+	}
+
+	t.Run("matches by the opaque resource_id itself", func(t *testing.T) {
+		id := "11111111-1111-1111-1111-111111111111"
+		page, err := env.svc.ListAuditLogs(t.Context(), auditAdminID, auditTestOrgID, repository.AuditLogFilter{ResourceID: &id}, "")
+		if err != nil {
+			t.Fatalf("ListAuditLogs() error = %v", err)
+		}
+		if len(page.Entries) != 1 || page.Entries[0].Action != "secret.created" {
+			t.Errorf("Entries = %+v, want exactly the secret.created entry", page.Entries)
+		}
+	})
+
+	t.Run("matches by the secret's Metadata path", func(t *testing.T) {
+		path := "prod/db/password"
+		page, err := env.svc.ListAuditLogs(t.Context(), auditAdminID, auditTestOrgID, repository.AuditLogFilter{ResourceID: &path}, "")
+		if err != nil {
+			t.Fatalf("ListAuditLogs() error = %v", err)
+		}
+		if len(page.Entries) != 1 || page.Entries[0].Action != "secret.created" {
+			t.Errorf("Entries = %+v, want exactly the secret.created entry, found by its path", page.Entries)
+		}
+	})
+
+	t.Run("matches by the lease's Metadata resource_path", func(t *testing.T) {
+		path := "infra/postgres/demo"
+		page, err := env.svc.ListAuditLogs(t.Context(), auditAdminID, auditTestOrgID, repository.AuditLogFilter{ResourceID: &path}, "")
+		if err != nil {
+			t.Fatalf("ListAuditLogs() error = %v", err)
+		}
+		if len(page.Entries) != 1 || page.Entries[0].Action != "lease.created" {
+			t.Errorf("Entries = %+v, want exactly the lease.created entry, found by its resource_path", page.Entries)
+		}
+	})
+
+	t.Run("no match for an unrelated value", func(t *testing.T) {
+		bogus := "does/not/exist"
+		page, err := env.svc.ListAuditLogs(t.Context(), auditAdminID, auditTestOrgID, repository.AuditLogFilter{ResourceID: &bogus}, "")
+		if err != nil {
+			t.Fatalf("ListAuditLogs() error = %v", err)
+		}
+		if len(page.Entries) != 0 {
+			t.Errorf("Entries = %+v, want none", page.Entries)
+		}
+	})
+}
+
 func TestAuditService_ListAuditLogs_FiltersByResult(t *testing.T) {
 	env := newTestAuditEnv(t)
 	seedAuditEntry(t, env, "secret.access_denied", entity.AuditResultDenied, time.Now())

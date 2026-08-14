@@ -94,6 +94,45 @@ func TestAuditRepository_List_FiltersByAction(t *testing.T) {
 	}
 }
 
+// TestAuditRepository_List_ResourceIDFilterAlsoMatchesMetadataPath is the
+// "search by resource ID/path" fix's own real-Postgres proof: a real
+// metadata->>'path' JSONB lookup, not the in-memory fake's own
+// reimplementation (see mocks.FakeAuditLogRepository's own
+// auditEntryMatchesFilter). resource_type is scoped to this test's own
+// marker so a concurrent/leftover row elsewhere in this shared dev
+// database can never produce a false match.
+func TestAuditRepository_List_ResourceIDFilterAlsoMatchesMetadataPath(t *testing.T) {
+	db := connectForRegisterTest(t)
+	marker := "it-respath-" + t.Name()
+	appendAuditEntry(t, db, &entity.AuditLogEntry{
+		OrganizationID: strPtrForTest(secretTestOrgID), ActorType: entity.AuditActorUser,
+		Action: "secret.created", ResourceType: strPtrForTest(marker),
+		ResourceID: strPtrForTest("33333333-3333-3333-3333-333333333333"),
+		Result:     entity.AuditResultSuccess, Metadata: map[string]any{"path": "prod/db/password"},
+	})
+
+	resourceType := marker
+	path := "prod/db/password"
+	got, err := auditReadRepo(db).List(context.Background(), secretTestOrgID,
+		repository.AuditLogFilter{ResourceType: &resourceType, ResourceID: &path, Limit: 10})
+	if err != nil {
+		t.Fatalf("List(resource_id=path) error = %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "secret.created" {
+		t.Fatalf("List(resource_id=%q) = %+v, want exactly the row whose Metadata[\"path\"] equals that value", path, got)
+	}
+
+	id := "33333333-3333-3333-3333-333333333333"
+	got, err = auditReadRepo(db).List(context.Background(), secretTestOrgID,
+		repository.AuditLogFilter{ResourceType: &resourceType, ResourceID: &id, Limit: 10})
+	if err != nil {
+		t.Fatalf("List(resource_id=id) error = %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "secret.created" {
+		t.Fatalf("List(resource_id=%q) = %+v, want exactly the row with that opaque resource_id", id, got)
+	}
+}
+
 // TestAuditRepository_CountByResult_ReflectsFullFilteredSetAgainstRealDB is
 // the Audit Explorer summary cards' own real-Postgres proof: the grouped
 // COUNT query filters by the same ResourceType marker every other test in

@@ -171,7 +171,26 @@ func whereClauseForFilter(organizationID string, f repository.AuditLogFilter) (s
 	}
 	if f.ResourceID != nil {
 		args = append(args, *f.ResourceID)
-		query += placeholder(" AND resource_id = $", len(args))
+		n := placeholder("$", len(args))
+		// resource_id alone is the row's own opaque, stable ID (e.g. a
+		// secret or lease's UUID) — never the human-readable path an
+		// operator actually searches for. The path lives only in
+		// Metadata, under one of two keys different services already
+		// use (SecretService.recordSecretAudit writes "path";
+		// LeaseService.recordLeaseAudit writes "resource_path" — see
+		// each's own doc comment; never renamed to a single shared key
+		// here, since that would mean rewriting already-written,
+		// append-only historical rows). Matching either alongside
+		// resource_id itself is what makes the Audit Explorer's
+		// "Resource ID / path" search field actually search by path,
+		// not silently return nothing for a value that was always only
+		// ever in Metadata. Exact match, like resource_id's own
+		// comparison — this is not a fuzzy/full-text search, and
+		// intentionally has no index of its own: acceptable for this
+		// table's current scale, worth revisiting (e.g. a GIN index on
+		// metadata, or promoting path to a first-class indexed column)
+		// if it ever becomes a real query-latency problem.
+		query += " AND (resource_id = " + n + " OR metadata->>'path' = " + n + " OR metadata->>'resource_path' = " + n + ")"
 	}
 	if f.Result != nil {
 		args = append(args, *f.Result)

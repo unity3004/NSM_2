@@ -589,8 +589,22 @@ func auditEntryMatchesFilter(e *entity.AuditLogEntry, organizationID string, fil
 	if filter.ResourceType != nil && (e.ResourceType == nil || *e.ResourceType != *filter.ResourceType) {
 		return false
 	}
-	if filter.ResourceID != nil && (e.ResourceID == nil || *e.ResourceID != *filter.ResourceID) {
-		return false
+	if filter.ResourceID != nil {
+		// Mirrors postgres.whereClauseForFilter's own resource_id OR
+		// metadata->>'path' OR metadata->>'resource_path' match — see
+		// that function's own doc comment for why.
+		want := *filter.ResourceID
+		matchesID := e.ResourceID != nil && *e.ResourceID == want
+		matchesPath := false
+		if s, ok := e.Metadata["path"].(string); ok && s == want {
+			matchesPath = true
+		}
+		if s, ok := e.Metadata["resource_path"].(string); ok && s == want {
+			matchesPath = true
+		}
+		if !matchesID && !matchesPath {
+			return false
+		}
 	}
 	if filter.Result != nil && e.Result != *filter.Result {
 		return false
