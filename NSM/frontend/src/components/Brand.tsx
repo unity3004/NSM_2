@@ -1,9 +1,9 @@
-import { KanzMark } from "@/components/brand/KanzMark"
+import { KanzLogo } from "@/components/brand/KanzLogo"
 import { cn } from "@/lib/utils"
 
 // The one place the product name and mark are defined — every surface that
 // shows branding (the sidebar, the login page's identity panel) renders
-// this component rather than repeating "KANZ" + KanzMark inline, so there
+// this component rather than repeating "KANZ" + KanzLogo inline, so there
 // is exactly one place to update if either ever changes.
 interface BrandProps {
   size?: "sm" | "lg"
@@ -12,18 +12,22 @@ interface BrandProps {
    * sidebar state needs to hide the text while keeping the icon visible,
    * which has to target the span specifically, not the whole component. */
   textClassName?: string
-  /** The continuous idle motion (slow core pulse, tiny fragment drift) —
-   * see KanzMark's own doc comment. Opt-in and off by default: the spec's
-   * "compact animated emblem" is specifically a sidebar treatment, not a
-   * blanket "the logo always moves" rule, so AuthLayout's login-page brand
-   * stays static and only AppLayout's sidebar usage passes this. */
+  /** Only meaningful at size="sm" (see the variant mapping below) — the
+   * sidebar's continuous idle motion is opt-in there, off by default, so
+   * a compact static mark stays available for chrome that shouldn't move
+   * (e.g. AuthLayout's mobile-fallback brand). size="lg" always animates:
+   * the KANZ logo brief is explicit that the *large* variant (login,
+   * splash, loading) is a continuously-alive treatment unconditionally,
+   * not a lower-priority opt-in the way the compact sidebar mark is. */
   animated?: boolean
 }
 
 export function Brand({ size = "sm", className, textClassName, animated = false }: BrandProps) {
+  const variant = size === "lg" ? "large" : animated ? "sidebar" : "static"
+
   return (
     <div className={cn("flex items-center gap-2 text-foreground", className)}>
-      <KanzMark size={size === "lg" ? 28 : 20} variant={animated ? "idle" : "static"} className="shrink-0" />
+      <KanzLogo variant={variant} className="shrink-0" />
       <span
         className={cn(
           "font-semibold tracking-tight",

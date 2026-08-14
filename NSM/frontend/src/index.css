@@ -87,7 +87,7 @@
    KANZ design tokens — the single source of truth for the "Obsidian +
    Cyan" brand palette. Declared on bare :root (not .dark) so they're real,
    inspectable CSS custom properties usable from anywhere (inline styles,
-   the KanzMark/KanzSplash SVG components, raw CSS below) regardless of
+   the KanzLogo/KanzSplash SVG components, raw CSS below) regardless of
    theme class — the shadcn semantic variables in .dark above reference
    these rather than restating literals, and every one of the names below
    matches the spec's own --kanz-* naming exactly.
@@ -237,58 +237,111 @@
 }
 
 /* ==========================================================================
-   KANZ logo motion — the emblem's continuous idle state (sidebar) and its
-   one-time startup sequence (KanzSplash). Kept centralized here rather
-   than in component-level <style> tags so every animated brand surface
-   shares one definition of "what KANZ motion looks like."
+   KANZ logo motion. Kept centralized here rather than in component-level
+   <style> tags so every brand surface (sidebar, login, splash) shares one
+   definition of "what KANZ motion looks like."
+
+   kanz-fade-up (below) is the *splash sequence's* text choreography — the
+   wordmark/tagline fading up in KanzSplash — not part of the mark itself,
+   so it's untouched by the logo redesign.
+
+   Everything above it in this block is the "Living Security Core" mark:
+   a continuously, seamlessly looping fluid core + energy-field ring +
+   a few orbiting particles. There is deliberately no "in" animation and
+   no completion state — every rule below is `infinite`, and every
+   `animation-delay` on the actual elements (KanzLogo.tsx doesn't set
+   one; see the negative delays below) starts each layer already
+   mid-cycle, so there is nothing that reads as "the logo just finished
+   loading." Durations are intentionally non-integer-multiples of each
+   other (5.4s / 6.2s / 7.8s / 5.6s / 6.9s / 4.9s) so the combined motion
+   practically never repeats identically within a short viewing window.
    ========================================================================== */
-@keyframes kanz-idle-pulse {
-  0%, 100% { opacity: 1; filter: drop-shadow(0 0 4px color-mix(in oklab, var(--kanz-primary-glow) 45%, transparent)); }
-  50% { opacity: 0.85; filter: drop-shadow(0 0 9px color-mix(in oklab, var(--kanz-primary-glow) 75%, transparent)); }
+@keyframes kanz-core-a-morph {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.8); opacity: 0.4; }
 }
-@keyframes kanz-idle-drift {
-  0%, 100% { transform: translate(0, 0); }
-  50% { transform: translate(var(--kanz-drift-x, 0), var(--kanz-drift-y, 0)); }
+@keyframes kanz-core-b-morph {
+  0%, 100% { transform: rotate(45deg) scale(1); opacity: 0.55; }
+  50% { transform: rotate(72deg) scale(0.8); opacity: 1; }
 }
-@keyframes kanz-fragment-in {
-  0% { opacity: 0; transform: scale(0.4) translate(var(--kanz-from-x), var(--kanz-from-y)); }
-  60% { opacity: 1; }
-  100% { opacity: 1; transform: scale(1) translate(0, 0); }
+@keyframes kanz-ring-a-flow {
+  0%, 100% { rx: 15; ry: 13.5; transform: rotate(0deg); }
+  35% { rx: 12.5; ry: 16.5; transform: rotate(35deg); }
+  70% { rx: 16.5; ry: 12; transform: rotate(-18deg); }
 }
-@keyframes kanz-orbit-swirl {
-  0%, 20% { transform: rotate(0deg); }
-  60% { transform: rotate(14deg); }
-  100% { transform: rotate(0deg); }
+@keyframes kanz-ring-b-flow {
+  0%, 100% { rx: 12.5; ry: 14.5; transform: rotate(0deg); }
+  40% { rx: 15.5; ry: 11.5; transform: rotate(-28deg); }
+  75% { rx: 11; ry: 15.5; transform: rotate(20deg); }
 }
-@keyframes kanz-core-flash {
-  0%, 55% { opacity: 0.6; filter: drop-shadow(0 0 2px transparent); transform: scale(0.9); }
-  75% { opacity: 1; filter: drop-shadow(0 0 18px var(--kanz-primary-glow)); transform: scale(1.12); }
-  100% { opacity: 1; filter: drop-shadow(0 0 6px color-mix(in oklab, var(--kanz-primary-glow) 60%, transparent)); transform: scale(1); }
+/* Rotate + scale, both anchored at the true center (24px 24px), not the
+ * particle's own position — scaling a point already offset from that
+ * origin moves it closer to/further from center along its current
+ * angle "for free," which is what reads as a particle drifting in
+ * toward the core (shrinking, dimming — "merging") and back out again,
+ * without a second, separately-animated radius property. */
+@keyframes kanz-particle-1-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.9; }
+  30% { transform: rotate(110deg) scale(1.1); opacity: 1; }
+  48% { transform: rotate(150deg) scale(0.25); opacity: 0.3; }
+  65% { transform: rotate(190deg) scale(1); opacity: 0.9; }
+  100% { transform: rotate(360deg) scale(1); opacity: 0.9; }
+}
+@keyframes kanz-particle-2-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.75; }
+  40% { transform: rotate(-130deg) scale(0.3); opacity: 0.25; }
+  60% { transform: rotate(-190deg) scale(1); opacity: 0.85; }
+  100% { transform: rotate(-360deg) scale(1); opacity: 0.75; }
+}
+@keyframes kanz-particle-3-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.8; }
+  55% { transform: rotate(160deg) scale(1.05); opacity: 0.95; }
+  72% { transform: rotate(210deg) scale(0.2); opacity: 0.2; }
+  100% { transform: rotate(360deg) scale(1); opacity: 0.8; }
 }
 @keyframes kanz-fade-up {
   0% { opacity: 0; transform: translateY(6px); }
   100% { opacity: 1; transform: translateY(0); }
 }
 
-.kanz-mark-idle .kanz-mark-core {
-  animation: kanz-idle-pulse 3.2s ease-in-out infinite;
-  transform-origin: center;
+.kanz-core-a {
+  transform-origin: 24px 24px;
+  animation: kanz-core-a-morph 5.4s cubic-bezier(0.45, 0, 0.15, 1) infinite;
 }
-.kanz-mark-idle .kanz-mark-fragment {
-  animation: kanz-idle-drift 5.5s ease-in-out infinite;
-  transform-origin: center;
+.kanz-core-b {
+  transform-origin: 24px 24px;
+  animation: kanz-core-b-morph 5.4s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+}
+.kanz-ring-a {
+  transform-origin: 24px 24px;
+  animation: kanz-ring-a-flow 6.2s ease-in-out infinite;
+}
+.kanz-ring-b {
+  transform-origin: 24px 24px;
+  animation: kanz-ring-b-flow 7.8s ease-in-out infinite;
+}
+.kanz-particle-dot-1 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-1-move 5.6s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -1.3s;
+}
+.kanz-particle-dot-2 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-2-move 6.9s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -3.1s;
+}
+.kanz-particle-dot-3 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-3-move 4.9s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -2.4s;
+}
+/* Large variant only: a restrained outer glow ("stronger glow" for the
+ * login/splash-scale mark) — never applied to the sidebar's compact
+ * treatment, which the brief explicitly asks to keep glow reduced. */
+.kanz-logo-large {
+  filter: drop-shadow(0 0 7px color-mix(in oklab, var(--kanz-primary-glow) 40%, transparent));
 }
 
-.kanz-splash-fragment {
-  animation:
-    kanz-fragment-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) var(--kanz-stagger, 0ms) both,
-    kanz-orbit-swirl 0.65s ease-in-out calc(0.4s + var(--kanz-stagger, 0ms)) both;
-  transform-origin: center;
-}
-.kanz-splash-core {
-  animation: kanz-core-flash 0.45s ease-out 1s both;
-  transform-origin: center;
-}
 .kanz-splash-wordmark {
   animation: kanz-fade-up 0.3s ease-out 1.15s both;
 }
@@ -296,15 +349,21 @@
   animation: kanz-fade-up 0.3s ease-out 1.4s both;
 }
 
-/* prefers-reduced-motion: every animation above collapses to its final,
- * static frame instantly — the emblem and splash are still fully visible,
- * just not moving. This is the one place that guarantee is enforced, so
- * no individual component needs its own reduced-motion branch. */
+/* prefers-reduced-motion: every animation above collapses to its resting
+ * frame instantly — the hand-picked SVG attribute values in KanzLogo.tsx
+ * (a full circle, a 45°-rotated diamond at half opacity, both rings at
+ * their base geometry) already read as a complete, premium mark on their
+ * own, so this is a genuinely static *version of the same identity*, not
+ * a degraded one. This is the one place the guarantee is enforced, so no
+ * individual component needs its own reduced-motion branch. */
 @media (prefers-reduced-motion: reduce) {
-  .kanz-mark-idle .kanz-mark-core,
-  .kanz-mark-idle .kanz-mark-fragment,
-  .kanz-splash-fragment,
-  .kanz-splash-core,
+  .kanz-core-a,
+  .kanz-core-b,
+  .kanz-ring-a,
+  .kanz-ring-b,
+  .kanz-particle-dot-1,
+  .kanz-particle-dot-2,
+  .kanz-particle-dot-3,
   .kanz-splash-wordmark,
   .kanz-splash-tagline {
     animation-duration: 0.01ms !important;

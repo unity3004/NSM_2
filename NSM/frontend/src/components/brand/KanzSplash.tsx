@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react"
-import { KanzMark } from "@/components/brand/KanzMark"
+import { KanzLogo } from "@/components/brand/KanzLogo"
 
 const TOTAL_DURATION_MS = 1700
 // Matches the @media (prefers-reduced-motion: reduce) block in index.css,
@@ -9,10 +9,12 @@ const TOTAL_DURATION_MS = 1700
 const REDUCED_MOTION_DURATION_MS = 150
 
 /**
- * The full one-time KANZ intro sequence: fragments appear and orbit, the
- * core illuminates, then the wordmark and tagline fade in. ~1.2–1.8s total
- * (index.css owns the actual keyframe timing — this component only knows
- * when the sequence is over, so it can hand off to `onDone`).
+ * The KANZ intro screen: the large, continuously-alive KanzLogo mark plus
+ * the wordmark and tagline fading up shortly after mount. Unlike the
+ * mark's own motion (which never starts or stops — see KanzLogo's doc
+ * comment), this *screen* is still a one-time beat: it hands off to
+ * `onDone` after ~1.7s (index.css owns the wordmark/tagline fade timing)
+ * so LoginPage can move on to the real login form.
  *
  * Deliberately NOT mounted by RouteLoading (used on every guarded route
  * transition, including a plain page reload) — that would replay this on
@@ -35,7 +37,7 @@ export function KanzSplash({ onDone, tagline = true }: { onDone: () => void; tag
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-kanz-bg">
-      <KanzMark size={72} variant="splash" />
+      <KanzLogo variant="large" />
       <div className="flex flex-col items-center gap-2">
         <span className="kanz-splash-wordmark text-2xl font-semibold tracking-tight text-kanz-text">
           KANZ

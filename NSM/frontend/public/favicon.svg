@@ -1,22 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
-  <rect width="40" height="40" rx="8" fill="#05080D"/>
-  <g stroke="#1E2936" stroke-width="1">
-    <line x1="20" y1="20" x2="20" y2="6"/>
-    <line x1="20" y1="20" x2="34" y2="20"/>
-    <line x1="20" y1="20" x2="20" y2="34"/>
-    <line x1="20" y1="20" x2="6" y2="20"/>
-  </g>
-  <g fill="#111A24" stroke="#22D3EE" stroke-width="1" stroke-opacity="0.7">
-    <rect x="16.75" y="2.75" width="6.5" height="6.5" rx="1.5" transform="rotate(45 20 6)"/>
-    <rect x="30.75" y="16.75" width="6.5" height="6.5" rx="1.5" transform="rotate(45 34 20)"/>
-    <rect x="16.75" y="30.75" width="6.5" height="6.5" rx="1.5" transform="rotate(45 20 34)"/>
-    <rect x="2.75" y="16.75" width="6.5" height="6.5" rx="1.5" transform="rotate(45 6 20)"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="9" fill="#05080D"/>
   <defs>
-    <linearGradient id="core" x1="14" y1="14" x2="26" y2="26" gradientUnits="userSpaceOnUse">
+    <radialGradient id="core" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#67E8F9"/>
+      <stop offset="55%" stop-color="#22D3EE"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="8" y1="8" x2="40" y2="40" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#67E8F9"/>
       <stop offset="100%" stop-color="#0EA5E9"/>
     </linearGradient>
+    <filter id="goo" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="1.6" result="blur"/>
+      <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10" result="goo"/>
+      <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
+    </filter>
   </defs>
-  <rect x="13.5" y="13.5" width="13" height="13" rx="3" fill="url(#core)" transform="rotate(45 20 20)"/>
+  <g stroke="url(#ring)" fill="none">
+    <ellipse cx="24" cy="24" rx="15" ry="13.5" stroke-width="1.4" opacity="0.85"/>
+    <ellipse cx="24" cy="24" rx="12.5" ry="14.5" stroke-width="1" opacity="0.45"/>
+  </g>
+  <g filter="url(#goo)">
+    <circle cx="24" cy="24" r="6.5" fill="url(#core)"/>
+    <rect x="17.5" y="17.5" width="13" height="13" rx="5" fill="url(#core)" opacity="0.55" transform="rotate(45 24 24)"/>
+  </g>
 </svg>
