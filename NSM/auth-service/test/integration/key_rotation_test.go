@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"crypto/rand"
+	"strings"
 	"testing"
 
 	"github.com/acme/auth-service/internal/entity"
@@ -64,9 +65,31 @@ func (p *multiKeyTestProvider) GetKey(_ context.Context, keyID string) ([]byte, 
 }
 
 // TestKeyRotation_Simulation is Sprint 4 Task 1's rotation simulation,
-// run against a real Postgres database end to end — the encryption_keys
-// table (migrations/000026), secret_versions (migrations/000024), and the
-// real internal/secrets.KeyManager + EncryptionService, no mocks:
+// run against a real Postgres database for the secret-storage half of the
+// lifecycle — secrets/secret_versions (migrations/000024), the real
+// repository.SecretRepository, and the real internal/secrets.KeyManager +
+// EncryptionService, no mocks there. Key *metadata* bookkeeping, though,
+// deliberately uses secrets.NewInMemoryKeyMetadataStore() rather than
+// postgres.NewKeyMetadataStore(db) — a real, confirmed hazard, not just a
+// test-isolation nicety: encryption_keys (migrations/000026) is
+// platform-wide, not per-organization or per-test (see that migration's
+// own doc comment — a real production deployment has exactly one
+// KeyProvider/KeyManager for the whole process). In this shared dev
+// database, the actual running application has already bootstrapped its
+// own real ACTIVE key into that same table before this test ever runs.
+// KeyManager.ensureBootstrapped would find that real row, and
+// KeyManager.Rotate's ActivateNewKey would retire it and activate this
+// test's own "key-v1" in its place — genuinely breaking the live
+// application's encryption (its next GetCurrentKey call would try to
+// fetch "key-v1"'s material from its own DevKeyProvider, which has never
+// heard of it) for as long as this test suite happens to run alongside
+// it. InMemoryKeyMetadataStore (the same store internal/secrets/key_manager_test.go's
+// own unit tests already use) gives this test a private, isolated view
+// of key lifecycle state with zero risk to whatever else is connected to
+// this database, while every other part of the simulation below is still
+// exercised for real: real AES-256-GCM encryption, real envelope-DEK
+// wrapping, real Postgres secret_versions storage and retrieval, real
+// KeyManager rotation logic and state transitions.
 //
 //  1. key-v1 starts ACTIVE (KeyManager bootstrap).
 //  2. secret-version-1 is created; its stored key_id is key-v1.
@@ -75,6 +98,7 @@ func (p *multiKeyTestProvider) GetKey(_ context.Context, keyID string) ([]byte, 
 //  5. Both versions remain independently decryptable — version 1 under
 //     key-v1 (now retiring, not gone), version 2 under key-v2.
 //  6. New encryption after rotation uses key-v2, never key-v1 again.
+//  7. Neither plaintext value appears anywhere in the raw stored row.
 func TestKeyRotation_Simulation(t *testing.T) {
 	db := connectForRegisterTest(t)
 	ctx := context.Background()
@@ -82,7 +106,7 @@ func TestKeyRotation_Simulation(t *testing.T) {
 
 	provider := newMultiKeyTestProvider(t, "key-v1")
 	provider.addKey(t, "key-v2")
-	keyStore := postgres.NewKeyMetadataStore(db)
+	keyStore := secrets.NewInMemoryKeyMetadataStore()
 	keyManager := secrets.NewKeyManager(provider, keyStore)
 	enc := secrets.NewEncryptionService(keyManager)
 	secretRepo := postgres.NewSecretRepository(db)
@@ -180,6 +204,34 @@ func TestKeyRotation_Simulation(t *testing.T) {
 	}
 	if string(got2) != "version-2-secret-value" {
 		t.Errorf("Decrypt() version 2 = %q, want %q", got2, "version-2-secret-value")
+	}
+
+	// --- Verify: neither plaintext value appears in the raw stored row,
+	// under either key — the objective's own "no plaintext secret values
+	// being stored" requirement, checked directly against what rotation
+	// actually wrote (TestSecretVersion_NoPlaintextInDatabase separately
+	// covers the schema-level guarantee; this is the row-content half,
+	// specific to this test's own two plaintexts and both key
+	// generations). ---
+	for _, plaintext := range []string{"version-1-secret-value", "version-2-secret-value"} {
+		// encode(bytea, 'escape') renders the raw bytes as text (escaping
+		// only non-printable ones) — unlike a plain ::text cast on a bytea
+		// column, which Postgres always hex-encodes and so could never
+		// contain a plaintext substring even if the check meant to catch
+		// that it did.
+		var rawCount int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM secret_versions WHERE secret_id = $1 AND encode(ciphertext, 'escape') LIKE '%' || $2 || '%'`,
+			s.ID, plaintext,
+		).Scan(&rawCount); err != nil {
+			t.Fatalf("checking raw ciphertext for plaintext leakage: %v", err)
+		}
+		if rawCount > 0 {
+			t.Errorf("plaintext %q appears in raw stored ciphertext — encryption is not actually protecting this value", plaintext)
+		}
+	}
+	if strings.Contains(string(stored1.Ciphertext), "version-1-secret-value") || strings.Contains(string(stored2.Ciphertext), "version-2-secret-value") {
+		t.Error("plaintext appears verbatim in the decoded ciphertext bytes")
 	}
 
 	// --- Verify: GetCurrentKey now resolves to key-v2, not key-v1 ---

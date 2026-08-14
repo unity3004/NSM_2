@@ -21,14 +21,46 @@ const secretTestOrgID = "00000000-0000-4000-8000-000000000001"
 // and secret_versions.created_by's foreign keys — the same "seed the real
 // chain of rows a foreign key requires" approach seedUserSessionAndRefreshToken
 // already uses for refresh tokens.
+//
+// Username is namespaced by t.Name() the same way Email already is —
+// previously left as the Go zero value (""), which every one of this
+// function's many call sites across this package shared identically.
+// users has a UNIQUE(organization_id, username) constraint (see
+// migrations/000019), so the very first call in any given
+// `go test` process to actually reach the database won by inserting the
+// one permitted row with username="", and every other call — from any
+// other test in the same run, regardless of its own distinct email —
+// failed with "resource already exists". Found while diagnosing
+// TestKeyRotation_Simulation's own failure, which turned out to be this
+// same pre-existing bug, not anything specific to key rotation.
+//
+// t.Cleanup deletes this user (and, first, every secrets/secret_versions
+// row it owns — both have an ON DELETE RESTRICT foreign key to users.id,
+// see migrations/000024, so the user row cannot be removed while either
+// still references it) once the calling test finishes. Previously
+// nothing cleaned this up at all, so a namespaced-but-still-fixed email
+// like this one would itself collide on any second run against the same
+// database — exactly the failure this fix would otherwise just move from
+// "username" to "email" instead of actually closing.
 func seedSecretTestUser(t *testing.T, db *sql.DB) *entity.User {
 	t.Helper()
 	users := postgres.NewUserRepository(db)
-	email := "secrets-it-" + t.Name() + "@example.com"
-	user := &entity.User{OrganizationID: secretTestOrgID, Email: email, Status: entity.UserStatusActive}
+	suffix := "secrets-it-" + t.Name()
+	user := &entity.User{
+		OrganizationID: secretTestOrgID,
+		Email:          suffix + "@example.com",
+		Username:       strPtrForTest(suffix),
+		Status:         entity.UserStatusActive,
+	}
 	if err := users.Create(context.Background(), user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = db.ExecContext(ctx, `DELETE FROM secret_versions WHERE created_by = $1`, user.ID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM secrets WHERE created_by = $1`, user.ID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, user.ID)
+	})
 	return user
 }
 
