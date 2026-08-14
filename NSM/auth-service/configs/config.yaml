@@ -64,6 +64,26 @@ rate_limit:
 #       schemas: [public]
 #       privileges: [SELECT]
 
+# role_templates is safe to commit unconditionally — see
+# PostgresRoleTemplate's own doc comment: it names no credential, only
+# which (database, schema, privilege) combinations a caller may select by
+# name once the feature above is actually enabled. It sits here, uncommented,
+# specifically so enabling the feature is ever only "set
+# AUTH_POSTGRES_PROVISIONER_ENABLED=true plus the connection env vars" —
+# never "also go edit this file" — the identical split every other
+# optional subsystem in this file already keeps between committed
+# operational shape and environment-supplied enablement/secrets. Targets a
+# dedicated vault_demo schema (see docker/docker-compose.yml's own
+# provisioning step), never an application table like users or secrets,
+# so a demo dynamic credential can never read anything this service
+# itself depends on.
+postgres_provisioner:
+  role_templates:
+    - name: demo-readonly
+      database: authdb
+      schemas: [vault_demo]
+      privileges: [SELECT]
+
 log:
   level: info
   format: json

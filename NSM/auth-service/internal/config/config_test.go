@@ -100,6 +100,59 @@ func TestLoad_ProductionRequiresDatabasePassword(t *testing.T) {
 	}
 }
 
+// TestLoad_PostgresProvisionerEnvVarsAreBound is a regression test for a
+// real gap the Dynamic Secrets & Lease Engine phase found: none of
+// postgres_provisioner.{host,port,user,password,name} had a default, a
+// config-file entry, or an explicit BindEnv call — which meant, despite
+// looking identical to every other secret-shaped field in this file
+// (database.password, secrets.dev_master_key, ...), Viper's AutomaticEnv
+// silently never read AUTH_POSTGRES_PROVISIONER_* for any of them. An
+// operator could set postgres_provisioner.enabled=true and every one of
+// these variables and still get an empty Host/User/Password/Name back —
+// exactly the "operator sets everything, feature silently doesn't work"
+// failure mode the surrounding BindEnv comment block already warns other
+// fields in this function against. This test sets every scalar
+// connection field via its env var and asserts Load() actually carries
+// each one through — role_templates is deliberately not exercised here
+// (it has no env-var mechanism at all, by design — an array can't be
+// flattened into a single environment variable the way a scalar can; see
+// configs/config.yaml's own worked example for how that field is meant
+// to be configured instead), so Enabled is left false here purely to
+// keep Validate() from also demanding a role_templates entry this test
+// isn't about.
+func TestLoad_PostgresProvisionerEnvVarsAreBound(t *testing.T) {
+	t.Setenv("AUTH_JWT_SIGNING_KEY", validKey)
+	t.Setenv("AUTH_DATABASE_PASSWORD", "s3cret")
+	setValidAccessTokenEnv(t)
+	t.Setenv("AUTH_POSTGRES_PROVISIONER_HOST", "provisioner.internal")
+	t.Setenv("AUTH_POSTGRES_PROVISIONER_PORT", "5433")
+	t.Setenv("AUTH_POSTGRES_PROVISIONER_USER", "vault_provisioner")
+	t.Setenv("AUTH_POSTGRES_PROVISIONER_PASSWORD", "provisioner-secret")
+	t.Setenv("AUTH_POSTGRES_PROVISIONER_NAME", "authdb")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+
+	p := cfg.PostgresProvisioner
+	if p.Host != "provisioner.internal" {
+		t.Errorf("PostgresProvisioner.Host = %q, want %q (AUTH_POSTGRES_PROVISIONER_HOST)", p.Host, "provisioner.internal")
+	}
+	if p.Port != 5433 {
+		t.Errorf("PostgresProvisioner.Port = %d, want 5433 (AUTH_POSTGRES_PROVISIONER_PORT)", p.Port)
+	}
+	if p.User != "vault_provisioner" {
+		t.Errorf("PostgresProvisioner.User = %q, want %q (AUTH_POSTGRES_PROVISIONER_USER)", p.User, "vault_provisioner")
+	}
+	if p.Password != "provisioner-secret" {
+		t.Errorf("PostgresProvisioner.Password = %q, want %q (AUTH_POSTGRES_PROVISIONER_PASSWORD) — this is the field that was silently empty before the BindEnv fix", p.Password, "provisioner-secret")
+	}
+	if p.Name != "authdb" {
+		t.Errorf("PostgresProvisioner.Name = %q, want %q (AUTH_POSTGRES_PROVISIONER_NAME)", p.Name, "authdb")
+	}
+}
+
 func TestDatabaseConfig_DSN(t *testing.T) {
 	t.Run("prefers URL when set", func(t *testing.T) {
 		d := DatabaseConfig{URL: "postgres://explicit-dsn"}

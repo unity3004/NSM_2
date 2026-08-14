@@ -100,8 +100,44 @@ services:
       # random, local-only AES-256 key (openssl rand -base64 32) —
       # never a production key, never committed anywhere else.
       AUTH_SECRETS_DEV_MASTER_KEY: "lUBRscqa4+uHENOYHeExzQASHHEUiL6lbybsfzCCYYs="
+      # Enables the Dynamic Secrets & Lease Engine's real PostgreSQL
+      # provider (leasing/postgres.Provider) — see
+      # config.PostgresProvisionerConfig's own doc comment. vault_provisioner
+      # is a real, dedicated, non-superuser role (LOGIN + CREATEROLE only —
+      # confirmed via `SELECT rolsuper FROM pg_roles` returning false)
+      # created one-time in this compose stack's postgres volume, holding
+      # GRANT-able CONNECT/USAGE/SELECT WITH GRANT OPTION scoped to the
+      # vault_demo schema only (see leasing/postgres.Provider's own doc
+      # comment for the exact privilege list) — never SUPERUSER, and never
+      # the application's own AUTH_DATABASE_URL identity above. The
+      # password below is this local compose stack's own disposable
+      # value, generated the same way AUTH_SECRETS_DEV_MASTER_KEY was;
+      # role_templates itself (which database/schema/privileges
+      # "demo-readonly" actually names) lives in ../configs/config.yaml,
+      # not here — see that file's own comment on why that split is safe.
+      AUTH_POSTGRES_PROVISIONER_ENABLED: "true"
+      AUTH_POSTGRES_PROVISIONER_HOST: "postgres"
+      AUTH_POSTGRES_PROVISIONER_PORT: "5432"
+      AUTH_POSTGRES_PROVISIONER_USER: "vault_provisioner"
+      AUTH_POSTGRES_PROVISIONER_PASSWORD: "mzoU8RhHxybpD1L803MB8YitHmYCy1a"
+      AUTH_POSTGRES_PROVISIONER_NAME: "authdb"
     volumes:
       - ./.dev-secrets:/dev-secrets:ro
+      # The runtime image (see Dockerfile's distroless stage) deliberately
+      # ships with no config file at all — "production configuration is
+      # 100% environment variables" is the documented design, and every
+      # other setting above honors that. postgres_provisioner.role_templates
+      # is the one config key that structurally can't follow it: it's an
+      # array of {name, database, schemas, privileges} objects, and this
+      # codebase's env-var binding (internal/config.Load, AutomaticEnv +
+      # explicit BindEnv) only ever populates scalar fields — there is no
+      # array-from-environment-variable convention here to extend. A
+      # read-only bind mount of the same non-secret config.yaml every
+      # contributor's own `go run ./cmd/server` already reads is the
+      # narrowest way to supply it: this doesn't change what ships in the
+      # built image, only what this one compose service can additionally
+      # see at its already-existing ./configs search path.
+      - ../configs/config.yaml:/app/configs/config.yaml:ro
     ports:
       - "8080:8080"
     depends_on:

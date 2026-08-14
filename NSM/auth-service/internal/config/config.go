@@ -554,6 +554,29 @@ func Load() (*Config, error) {
 	if err := v.BindEnv("secrets.dev_master_key"); err != nil {
 		return nil, fmt.Errorf("config: bind secrets.dev_master_key: %w", err)
 	}
+	// postgres_provisioner.{host,port,user,password,name,url} have no
+	// default and (deliberately — see configs/config.yaml's own "never put
+	// a secret here" rule) no config-file entry either: this whole
+	// connection is a second, independently-privileged credential, most of
+	// which (password certainly, but host/port/user/name too, since they
+	// jointly name a specific, sensitive provisioning connection) has no
+	// business sitting in a committed file next to database.host's own
+	// harmless "localhost" default. Before this fix, that meant there was
+	// no way to actually populate this connection via environment variable
+	// at all — AutomaticEnv silently never sees AUTH_POSTGRES_PROVISIONER_*
+	// for a key with no default, no file entry, and no explicit bind — an
+	// operator could set postgres_provisioner.enabled=true and every one of
+	// these env vars and Load would still see empty strings for all of
+	// them, the exact silent-failure gotcha this function's own comment
+	// block above already warns about for every other secret it lists.
+	for _, key := range []string{
+		"postgres_provisioner.host", "postgres_provisioner.port", "postgres_provisioner.user",
+		"postgres_provisioner.password", "postgres_provisioner.name", "postgres_provisioner.url",
+	} {
+		if err := v.BindEnv(key); err != nil {
+			return nil, fmt.Errorf("config: bind %s: %w", key, err)
+		}
+	}
 
 	var cfg Config
 	decodeHook := mapstructure.ComposeDecodeHookFunc(
