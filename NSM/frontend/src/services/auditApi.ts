@@ -1,6 +1,5 @@
 import { httpClient } from "@/services/httpClient"
-import type { ListResponse } from "@/types/common"
-import type { AuditLogFilters, AuditLogResponse } from "@/types/audit"
+import type { AuditLogFilters, AuditLogListResponse } from "@/types/audit"
 
 function buildAuditLogQuery(filters: AuditLogFilters): string {
   const params = new URLSearchParams()
@@ -19,6 +18,6 @@ function buildAuditLogQuery(filters: AuditLogFilters): string {
 export function listAuditLogs(
   filters: AuditLogFilters,
   signal?: AbortSignal,
-): Promise<ListResponse<AuditLogResponse>> {
-  return httpClient.get<ListResponse<AuditLogResponse>>(`/v1/audit-logs${buildAuditLogQuery(filters)}`, { signal })
+): Promise<AuditLogListResponse> {
+  return httpClient.get<AuditLogListResponse>(`/v1/audit-logs${buildAuditLogQuery(filters)}`, { signal })
 }

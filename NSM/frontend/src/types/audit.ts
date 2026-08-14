@@ -5,6 +5,8 @@
 // Update or Delete method" doc comment) — audit_logs rows are written
 // exclusively by the backend itself, as a side effect of other actions.
 
+import type { PageMeta } from "@/types/common"
+
 export type AuditActorType = "user" | "service_account" | "api_key" | "system"
 export type AuditResult = "success" | "failure" | "denied"
 
@@ -27,6 +29,27 @@ export interface AuditLogResponse {
   prev_hash?: string | null
   record_hash: string
   occurred_at: string
+}
+
+/** GET /v1/audit-logs' own "summary" field — Total/Successful/Failed/
+ * Denied, computed server-side across every row the request's filters
+ * match, not merely the one page of `data` returned alongside it. See
+ * dto.AuditLogSummary's own doc comment. */
+export interface AuditLogSummary {
+  total: number
+  success: number
+  failure: number
+  denied: number
+}
+
+/** GET /v1/audit-logs' own list.data/list.page (dto.PageMeta) is the
+ * generic services/httpClient ListResponse<T> already covers — the
+ * summary field is the one thing that shape doesn't have, since no other
+ * list endpoint returns one. */
+export interface AuditLogListResponse {
+  data: AuditLogResponse[]
+  page: PageMeta
+  summary: AuditLogSummary
 }
 
 /** GET /v1/audit-logs' query parameters — every field optional, applied

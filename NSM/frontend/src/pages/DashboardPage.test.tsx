@@ -131,6 +131,7 @@ describe("DashboardPage, real data", () => {
         },
       ],
       page: { next_cursor: null, has_more: false, limit: 5 },
+      summary: { total: 1, success: 1, failure: 0, denied: 0 },
     })
 
     renderWithProviders(<DashboardPage />)
@@ -152,7 +153,11 @@ describe("DashboardPage, real data", () => {
       page: { next_cursor: null, has_more: false, limit: 20 },
     })
     leases.listLeases.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 50 } })
-    audit.listAuditLogs.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 5 } })
+    audit.listAuditLogs.mockResolvedValue({
+      data: [],
+      page: { next_cursor: null, has_more: false, limit: 5 },
+      summary: { total: 0, success: 0, failure: 0, denied: 0 },
+    })
 
     renderWithProviders(<DashboardPage />)
 
@@ -177,7 +182,11 @@ describe("DashboardPage, real data", () => {
       page: { next_cursor: null, has_more: false, limit: 20 },
     })
     leases.listLeases.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 50 } })
-    audit.listAuditLogs.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 5 } })
+    audit.listAuditLogs.mockResolvedValue({
+      data: [],
+      page: { next_cursor: null, has_more: false, limit: 5 },
+      summary: { total: 0, success: 0, failure: 0, denied: 0 },
+    })
 
     renderWithProviders(<DashboardPage />)
 
@@ -191,7 +200,11 @@ describe("DashboardPage, real data", () => {
       page: { next_cursor: null, has_more: false, limit: 20 },
     })
     leases.listLeases.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 50 } })
-    audit.listAuditLogs.mockResolvedValue({ data: [], page: { next_cursor: null, has_more: false, limit: 5 } })
+    audit.listAuditLogs.mockResolvedValue({
+      data: [],
+      page: { next_cursor: null, has_more: false, limit: 5 },
+      summary: { total: 0, success: 0, failure: 0, denied: 0 },
+    })
 
     renderWithProviders(<DashboardPage />)
 

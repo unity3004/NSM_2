@@ -20,18 +20,33 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { useAuditLogs } from "@/features/audit/useAuditLogs"
+import { AuditEventDetailSheet } from "@/features/audit/AuditEventDetailSheet"
 import type { AuditLogFilters, AuditLogResponse, AuditResult } from "@/types/audit"
 
+// success/failure/denied are three distinct security outcomes (the
+// objective's own "clearly distinguish SUCCESS / FAILURE / DENIED"
+// requirement) — each gets its own badge treatment rather than
+// collapsing failure and denied into the same visual, which would make
+// "an operation errored" indistinguishable from "authorization refused
+// it" at a glance.
 function resultBadgeVariant(result: AuditResult): "outline" | "destructive" | "secondary" {
   switch (result) {
     case "success":
       return "outline"
-    case "denied":
     case "failure":
       return "destructive"
-    default:
+    case "denied":
       return "secondary"
   }
+}
+
+function SummaryCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border p-4">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className="text-2xl font-semibold tabular-nums">{value.toLocaleString()}</span>
+    </div>
+  )
 }
 
 // REAL API DATA: every row comes from GET /v1/audit-logs (audit:read-gated,
@@ -44,6 +59,7 @@ export function AuditLogsPage() {
   const [draftFilters, setDraftFilters] = useState<AuditLogFilters>({ limit: 25 })
   const [appliedFilters, setAppliedFilters] = useState<AuditLogFilters>({ limit: 25 })
   const [pages, setPages] = useState<AuditLogResponse[][]>([])
+  const [selectedEvent, setSelectedEvent] = useState<AuditLogResponse | null>(null)
 
   const { data, isLoading, isFetching, isError } = useAuditLogs(appliedFilters)
 
@@ -79,6 +95,13 @@ export function AuditLogsPage() {
         </p>
       </div>
 
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <SummaryCard label="Total events" value={data?.summary.total ?? 0} />
+        <SummaryCard label="Successful" value={data?.summary.success ?? 0} />
+        <SummaryCard label="Failed" value={data?.summary.failure ?? 0} />
+        <SummaryCard label="Denied" value={data?.summary.denied ?? 0} />
+      </div>
+
       <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="filter-action">Action</Label>
@@ -101,13 +124,63 @@ export function AuditLogsPage() {
           />
         </div>
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="filter-resource">Resource type</Label>
+          <Label htmlFor="filter-resource-type">Resource type</Label>
           <Input
-            id="filter-resource"
+            id="filter-resource-type"
             placeholder="secret"
-            className="w-40 font-mono"
+            className="w-36 font-mono"
             value={draftFilters.resource_type ?? ""}
             onChange={(e) => setDraftFilters((f) => ({ ...f, resource_type: e.target.value || undefined }))}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="filter-resource-id">Resource ID / path</Label>
+          <Input
+            id="filter-resource-id"
+            placeholder="prod/db/password"
+            className="w-48 font-mono"
+            value={draftFilters.resource_id ?? ""}
+            onChange={(e) => setDraftFilters((f) => ({ ...f, resource_id: e.target.value || undefined }))}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="filter-request-id">Request ID</Label>
+          <Input
+            id="filter-request-id"
+            placeholder="req_..."
+            className="w-40 font-mono"
+            value={draftFilters.request_id ?? ""}
+            onChange={(e) => setDraftFilters((f) => ({ ...f, request_id: e.target.value || undefined }))}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="filter-after">From</Label>
+          <Input
+            id="filter-after"
+            type="datetime-local"
+            className="w-48"
+            value={draftFilters.occurred_after?.slice(0, 16) ?? ""}
+            onChange={(e) =>
+              setDraftFilters((f) => ({
+                ...f,
+                occurred_after: e.target.value ? new Date(e.target.value).toISOString() : undefined,
+              }))
+            }
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="filter-before">To</Label>
+          <Input
+            id="filter-before"
+            type="datetime-local"
+            className="w-48"
+            value={draftFilters.occurred_before?.slice(0, 16) ?? ""}
+            onChange={(e) =>
+              setDraftFilters((f) => ({
+                ...f,
+                occurred_before: e.target.value ? new Date(e.target.value).toISOString() : undefined,
+              }))
+            }
           />
         </div>
         <div className="flex flex-col gap-1.5">
@@ -170,7 +243,11 @@ export function AuditLogsPage() {
                 </TableRow>
               )}
               {rows.map((e) => (
-                <TableRow key={e.id}>
+                <TableRow
+                  key={e.id}
+                  className="cursor-pointer"
+                  onClick={() => setSelectedEvent(e)}
+                >
                   <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                     {new Date(e.occurred_at).toLocaleString()}
                   </TableCell>
@@ -202,6 +279,13 @@ export function AuditLogsPage() {
           {isFetching ? "Loading…" : "Load more"}
         </Button>
       )}
+
+      <AuditEventDetailSheet
+        event={selectedEvent}
+        onOpenChange={(open) => {
+          if (!open) setSelectedEvent(null)
+        }}
+      />
     </div>
   )
 }
