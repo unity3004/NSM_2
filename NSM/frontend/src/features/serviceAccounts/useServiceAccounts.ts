@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query"
 import { listServiceAccounts } from "@/services/serviceAccountsApi"
 
-export function useServiceAccounts() {
+export function useServiceAccounts(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["service-accounts"],
     queryFn: ({ signal }) => listServiceAccounts(signal),
+    enabled: options?.enabled,
   })
 }

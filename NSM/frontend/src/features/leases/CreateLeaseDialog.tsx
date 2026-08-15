@@ -20,27 +20,17 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { useCreateLease } from "@/features/leases/useLeaseMutations"
+import { useCountdown } from "@/features/leases/useCountdown"
+import { LEASE_TYPE_LABELS } from "@/features/leases/leaseDisplay"
 import { ApiError } from "@/lib/apiError"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
-import { Timer, TriangleAlert, Copy, Check } from "lucide-react"
+import { Zap, TriangleAlert, Copy, Check, Lock } from "lucide-react"
 import { toast } from "sonner"
 
-/**
- * The exact set of dynamic-credential providers compiled into the backend
- * (leasing.DevCredentialProvider.Type() / leasing/postgres.Provider.Type())
- * — POST /v1/leases looks its "type" field up in an exact-match provider
- * registry keyed by these literal strings and returns a 422 "Unknown lease
- * type" for anything else. This used to be a free-text input, which let a
- * user type a reasonable-looking value (e.g. "PostgreSQL") that silently
- * never matched the registry's "postgres" key. There is no discovery
- * endpoint that lists registered providers, so this list is hand-kept in
- * sync with the backend's registrations in cmd/server/main.go — add an
- * entry here whenever a new provider is registered there.
- */
-const LEASE_TYPES: { value: string; label: string }[] = [
-  { value: "dev-credential", label: "Dev credential (local testing)" },
-  { value: "postgres", label: "PostgreSQL" },
-]
+const LEASE_TYPES: { value: string; label: string }[] = Object.entries(LEASE_TYPE_LABELS).map(([value, label]) => ({
+  value,
+  label,
+}))
 
 /**
  * Creates a lease and — once, immediately after creation — shows the raw
@@ -60,7 +50,7 @@ export function CreateLeaseDialog() {
   const [ttl, setTtl] = useState("")
   const [renewable, setRenewable] = useState(false)
   const [touched, setTouched] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
   const createLease = useCreateLease()
 
   function reset() {
@@ -70,7 +60,7 @@ export function CreateLeaseDialog() {
     setTtl("")
     setRenewable(false)
     setTouched(false)
-    setCopied(false)
+    setCopiedKey(null)
     createLease.reset()
   }
 
@@ -100,11 +90,13 @@ export function CreateLeaseDialog() {
     })
   }
 
-  async function handleCopy(secret: string) {
+  async function handleCopy(key: string, value: string) {
     try {
-      await navigator.clipboard.writeText(secret)
-      toast.success("Copied to clipboard.")
-      setCopied(true)
+      await navigator.clipboard.writeText(value)
+      // Never the value itself — see the same principle SecretDetailSheet's
+      // own copy handler holds to.
+      toast.success("Credential copied to clipboard.")
+      setCopiedKey(key)
     } catch {
       toast.error("Could not copy — your browser may be blocking clipboard access.")
     }
@@ -122,18 +114,18 @@ export function CreateLeaseDialog() {
     >
       <DialogTrigger asChild>
         <Button size="sm">
-          <Timer />
-          New lease
+          <Zap />
+          Request Lease
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         {!created ? (
           <form onSubmit={handleSubmit}>
             <DialogHeader>
-              <DialogTitle>Request a dynamic secret lease</DialogTitle>
+              <DialogTitle>Request Temporary Credential</DialogTitle>
               <DialogDescription>
-                Issues a temporary credential with a bounded lifetime. The credential will only be
-                shown once, immediately after creation — it cannot be retrieved again.
+                KANZ will issue a temporary credential with a bounded lifetime. The credential
+                will be shown once, immediately after creation — it cannot be retrieved again.
               </DialogDescription>
             </DialogHeader>
 
@@ -158,13 +150,14 @@ export function CreateLeaseDialog() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="lease-path">Path</Label>
+                <Label htmlFor="lease-path">Resource</Label>
                 <Input
                   id="lease-path"
                   autoFocus
-                  placeholder="database/prod/readonly"
+                  placeholder="infra/postgres/demo"
                   value={path}
                   onChange={(event) => setPath(event.target.value)}
+                  className="font-mono"
                   aria-invalid={!!pathError}
                 />
                 {pathError && (
@@ -178,7 +171,7 @@ export function CreateLeaseDialog() {
                 <Label htmlFor="lease-role">Role (optional)</Label>
                 <Input
                   id="lease-role"
-                  placeholder="payment-readonly"
+                  placeholder="demo-readonly"
                   value={role}
                   onChange={(event) => setRole(event.target.value)}
                   aria-invalid={!!roleError}
@@ -199,13 +192,13 @@ export function CreateLeaseDialog() {
                 <Label htmlFor="lease-ttl">TTL (optional)</Label>
                 <Input
                   id="lease-ttl"
-                  placeholder="30m"
+                  placeholder="10m"
                   value={ttl}
                   onChange={(event) => setTtl(event.target.value)}
                   aria-invalid={!!ttlError}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Go duration syntax (e.g. "30m", "1h"). Leave blank to use the server default —
+                  Go duration syntax (e.g. "10m", "1h"). Leave blank to use the server default —
                   requests above the server's configured maximum are clamped down, never rejected.
                 </p>
                 {ttlError && (
@@ -222,6 +215,11 @@ export function CreateLeaseDialog() {
                 </Label>
               </div>
 
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Lock className="size-3 shrink-0 text-kanz-primary" aria-hidden="true" />
+                The credential will be shown once after creation, then never again.
+              </p>
+
               {createLease.isError && (
                 <p role="alert" className="text-sm text-destructive">
                   {friendlyErrorMessage(createLease.error)}
@@ -231,71 +229,91 @@ export function CreateLeaseDialog() {
 
             <DialogFooter>
               <Button type="submit" disabled={createLease.isPending}>
-                <Timer />
+                <Zap />
                 {createLease.isPending ? "Requesting…" : "Request lease"}
               </Button>
             </DialogFooter>
           </form>
         ) : (
-          <>
-            <DialogHeader>
-              <DialogTitle>Lease created</DialogTitle>
-              <DialogDescription>
-                Copy this credential now. It will never be shown again — this dialog is the only
-                place it ever appears.
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="flex flex-col gap-4 py-4">
-              <div className="flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3">
-                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
-                <div className="flex flex-col gap-1">
-                  <p className="text-sm font-medium text-destructive">
-                    This credential will not be displayed again.
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    Store it now. Neither this page nor the backend can display it again — if it's
-                    lost, revoke this lease and request a new one.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3">
-                {Object.entries(created.credential).map(([key, value]) => (
-                  <div key={key} className="flex flex-col gap-1.5">
-                    <Label className="capitalize">{key}</Label>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 overflow-x-auto rounded-md border bg-muted px-2 py-1.5 text-xs">
-                        {value}
-                      </code>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        aria-label={`Copy ${key} to clipboard`}
-                        onClick={() => void handleCopy(value)}
-                      >
-                        {copied ? <Check className="text-green-600" /> : <Copy />}
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <DialogFooter>
-              <Button
-                onClick={() => {
-                  setOpen(false)
-                  reset()
-                }}
-              >
-                Done — I've stored it
-              </Button>
-            </DialogFooter>
-          </>
+          <CredentialIssued created={created} copiedKey={copiedKey} onCopy={handleCopy} onDone={() => { setOpen(false); reset() }} />
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+function CredentialIssued({
+  created,
+  copiedKey,
+  onCopy,
+  onDone,
+}: {
+  created: NonNullable<ReturnType<typeof useCreateLease>["data"]>
+  copiedKey: string | null
+  onCopy: (key: string, value: string) => void
+  onDone: () => void
+}) {
+  const countdown = useCountdown(created.expires_at, true)
+
+  return (
+    <>
+      <DialogHeader>
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-kanz-success/10 text-kanz-success">
+            <Check className="size-4" strokeWidth={2} aria-hidden="true" />
+          </span>
+          <DialogTitle>Temporary Credential Issued</DialogTitle>
+        </div>
+        <DialogDescription>
+          <span className="mb-0.5 block font-medium text-foreground">{LEASE_TYPE_LABELS[created.lease_type] ?? created.lease_type}</span>
+          <span className="font-mono text-xs">{created.resource_path}</span>
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="flex flex-col gap-4 py-4">
+        <div className="flex items-start gap-3 rounded-lg border border-kanz-warning/30 bg-kanz-warning/10 p-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-kanz-warning" aria-hidden="true" />
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-medium text-kanz-warning">Save this credential now.</p>
+            <p className="text-sm text-muted-foreground">
+              KANZ will not display this credential again after you leave this screen. If it's
+              lost, revoke this lease and request a new one.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          {Object.entries(created.credential).map(([key, value]) => (
+            <div key={key} className="flex flex-col gap-1.5">
+              <Label className="capitalize">{key}</Label>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 overflow-x-auto rounded-md border border-border bg-kanz-surface-elevated px-2 py-1.5 text-xs">
+                  {value}
+                </code>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Copy ${key} to clipboard`}
+                  onClick={() => onCopy(key, value)}
+                >
+                  {copiedKey === key ? <Check className="size-3.5 text-kanz-success" /> : <Copy className="size-3.5" />}
+                  {copiedKey === key ? "Copied" : `Copy ${key}`}
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-kanz-surface-elevated/50 px-3 py-2">
+          <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Expires in</span>
+          <span className="font-mono text-sm text-foreground">{countdown.label.replace("Expires in ", "")}</span>
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button onClick={onDone}>Done — I've stored it</Button>
+      </DialogFooter>
+    </>
   )
 }
