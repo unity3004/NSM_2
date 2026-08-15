@@ -1,0 +1,154 @@
+# Local development stack only — not what runs in production (there, the
+# database is a managed instance and the app is one of several replicas
+# behind a load balancer, neither of which docker-compose models well).
+# `docker compose up` from this directory gets a new contributor from zero
+# to a running service against a real Postgres in one command.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: authdb
+      POSTGRES_USER: authsvc
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authsvc -d authdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Backs internal/ratelimit's Redis-based authentication abuse protection
+  # (Milestone 6C) — REDIS_ADDR=localhost:6379 from the host, or
+  # redis:6379 from inside this compose network, is what
+  # test/integration/ratelimit_test.go and the app service below expect.
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ../migrations:/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable",
+        "up",
+      ]
+
+  # Generates a disposable, local-only Ed25519 key for AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH
+  # below (see internal/config/config.go's AccessTokenConfig — Config.Validate
+  # hard-requires this since Milestone 5B) and exits — the same one-shot,
+  # depends_on/service_completed_successfully shape as the migrate service
+  # above. Nothing here is a real secret: cmd/devkeygen/main.go generates a
+  # fresh Ed25519 private key with crypto/rand every time this file is
+  # missing, targets the Dockerfile's own "build" stage purely because
+  # that's the one stage with a Go toolchain in it (the app image itself is
+  # distroless — see Dockerfile), and writes into ./.dev-secrets, which
+  # ../.gitignore excludes from version control. Skips regenerating (see
+  # devkeygen's own check) if a previous `docker compose up` already left a
+  # key behind, so the app doesn't get a new `kid` on every restart.
+  keygen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: build
+    entrypoint: ["go", "run", "./cmd/devkeygen", "/dev-secrets/access-token-signing-key.pem"]
+    volumes:
+      - ./.dev-secrets:/dev-secrets
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      # Everything else (timeouts, pool sizes, log format) comes from
+      # ../configs/config.yaml's defaults — only the secrets, plus this
+      # environment's database/Redis host, need overriding here. See
+      # ../internal/config/config.go and ../README.md's config section.
+      AUTH_ENVIRONMENT: "development"
+      AUTH_DATABASE_URL: "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable"
+      AUTH_JWT_SIGNING_KEY: "local-development-signing-key-not-for-prod-use"
+      AUTH_REDIS_ADDR: "redis:6379"
+      # Vite's own dev server default port — see
+      # ../configs/.env.example's identical (commented-out) line for the
+      # non-Docker `go run ./cmd/server` equivalent. AllowedOrigins has no
+      # default of its own (config.go's own default is []), so a frontend
+      # dev server calling this API gets a real CORS error until this is
+      # set — this is that setting for the containerized stack.
+      AUTH_SERVER_ALLOWED_ORIGINS: "http://localhost:5173"
+      # key_id is just a label (see AccessTokenConfig.KeyID's own doc
+      # comment) — not secret. The actual private key material comes from
+      # the keygen service above, never from a literal here.
+      AUTH_ACCESS_TOKEN_KEY_ID: "dev-key-1"
+      AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH: "/dev-secrets/access-token-signing-key.pem"
+      # Enables the Secrets Engine (internal/secrets.DevKeyProvider) and
+      # registers the /v1/secrets* routes — see main.go's own "AUTH_SECRETS_DEV_MASTER_KEY
+      # not set" warning log for what happens without this. A disposable,
+      # random, local-only AES-256 key (openssl rand -base64 32) —
+      # never a production key, never committed anywhere else.
+      AUTH_SECRETS_DEV_MASTER_KEY: "lUBRscqa4+uHENOYHeExzQASHHEUiL6lbybsfzCCYYs="
+      # Enables the Dynamic Secrets & Lease Engine's real PostgreSQL
+      # provider (leasing/postgres.Provider) — see
+      # config.PostgresProvisionerConfig's own doc comment. vault_provisioner
+      # is a real, dedicated, non-superuser role (LOGIN + CREATEROLE only —
+      # confirmed via `SELECT rolsuper FROM pg_roles` returning false)
+      # created one-time in this compose stack's postgres volume, holding
+      # GRANT-able CONNECT/USAGE/SELECT WITH GRANT OPTION scoped to the
+      # vault_demo schema only (see leasing/postgres.Provider's own doc
+      # comment for the exact privilege list) — never SUPERUSER, and never
+      # the application's own AUTH_DATABASE_URL identity above. The
+      # password below is this local compose stack's own disposable
+      # value, generated the same way AUTH_SECRETS_DEV_MASTER_KEY was;
+      # role_templates itself (which database/schema/privileges
+      # "demo-readonly" actually names) lives in ../configs/config.yaml,
+      # not here — see that file's own comment on why that split is safe.
+      AUTH_POSTGRES_PROVISIONER_ENABLED: "true"
+      AUTH_POSTGRES_PROVISIONER_HOST: "postgres"
+      AUTH_POSTGRES_PROVISIONER_PORT: "5432"
+      AUTH_POSTGRES_PROVISIONER_USER: "vault_provisioner"
+      AUTH_POSTGRES_PROVISIONER_PASSWORD: "mzoU8RhHxybpD1L803MB8YitHmYCy1a"
+      AUTH_POSTGRES_PROVISIONER_NAME: "authdb"
+    volumes:
+      - ./.dev-secrets:/dev-secrets:ro
+      # The runtime image (see Dockerfile's distroless stage) deliberately
+      # ships with no config file at all — "production configuration is
+      # 100% environment variables" is the documented design, and every
+      # other setting above honors that. postgres_provisioner.role_templates
+      # is the one config key that structurally can't follow it: it's an
+      # array of {name, database, schemas, privileges} objects, and this
+      # codebase's env-var binding (internal/config.Load, AutomaticEnv +
+      # explicit BindEnv) only ever populates scalar fields — there is no
+      # array-from-environment-variable convention here to extend. A
+      # read-only bind mount of the same non-secret config.yaml every
+      # contributor's own `go run ./cmd/server` already reads is the
+      # narrowest way to supply it: this doesn't change what ships in the
+      # built image, only what this one compose service can additionally
+      # see at its already-existing ./configs search path.
+      - ../configs/config.yaml:/app/configs/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keygen:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

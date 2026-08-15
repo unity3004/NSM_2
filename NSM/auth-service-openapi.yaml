@@ -1,0 +1,1848 @@
+openapi: 3.1.0
+info:
+  title: Enterprise Authentication Service API
+  version: "1.0.0"
+  description: >
+    REST API for the Authentication Service described in auth_service_schema.sql
+    and auth-service-database-schema.md. Covers human and machine identity,
+    RBAC (roles, permissions, groups), sessions and refresh tokens, API keys,
+    service accounts, and read-only audit/login history feeds.
+
+
+    ## Conventions
+    - All request/response bodies are `application/json`, fields are `snake_case`
+      (matches the underlying table/column names 1:1 for easy tracing).
+    - All timestamps are ISO 8601 / RFC 3339 UTC (`2026-08-07T14:32:00Z`).
+    - All resource identifiers are UUIDv4 strings, except `login_history.id` and
+      `audit_logs.id`, which are opaque strings backed by a `BIGSERIAL`.
+    - The acting tenant is inferred from the caller's access token (`org_id` claim);
+      no endpoint accepts an arbitrary `organization_id` override.
+    - List endpoints are cursor-paginated: `GET /v1/resource?limit=20&cursor=...`.
+    - `POST` endpoints that create a resource accept an optional `Idempotency-Key`
+      header; replaying the same key returns the original response instead of
+      creating a duplicate.
+    - Every endpoint's required permission is a `resource:action` pair, matching
+      the `permissions` table's generated `name` column (e.g. `user:write`).
+  contact:
+    name: Platform Identity Team
+servers:
+  - url: https://auth.example.com/v1
+    description: Production
+  - url: https://auth.staging.example.com/v1
+    description: Staging
+
+tags:
+  - name: Auth
+    description: Login, token refresh, logout, and session self-service.
+  - name: Organizations
+    description: Tenant administration.
+  - name: Users
+    description: Human principals and their direct role grants.
+  - name: Groups
+    description: User collections and the roles they grant to members.
+  - name: Roles
+    description: Named, reusable bundles of permissions.
+  - name: Permissions
+    description: System-defined capabilities (read-only).
+  - name: Secrets
+    description: >-
+      Encrypted key/value secret storage (Sprint 3). Every value is
+      envelope-encrypted (AES-256-GCM) before it ever reaches the
+      database; only GET /secrets/{path} — an explicit, authorized read —
+      ever returns a decrypted value. List and write responses carry
+      metadata only.
+  - name: Service Accounts
+    description: Machine/workload principals.
+  - name: API Keys
+    description: Long-lived bearer credentials for users or service accounts.
+  - name: Audit Logs
+    description: Immutable, tamper-evident record of security-relevant actions (read-only).
+  - name: Login History
+    description: Record of every authentication attempt, success or failure (read-only).
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ============================== AUTH ==============================
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate with a password
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: "marcus.webb@acme.com", password: "Tr0ub4dor&3xample!" }
+      responses:
+        '200':
+          description: Authenticated. A new session and refresh-token family were created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Invalid credentials, or MFA step-up required.
+          content:
+            application/json:
+              examples:
+                bad_credentials:
+                  value: { error: { code: INVALID_CREDENTIALS, message: "Email or password is incorrect.", request_id: "req_01J9X..." } }
+                mfa_required:
+                  value: { error: { code: MFA_REQUIRED, message: "Password verified; complete MFA to receive tokens.", details: [{ field: "mfa_challenge_token", issue: "opaque token to submit to /auth/mfa/verify" }], request_id: "req_01J9X..." } }
+        '403':
+          description: Account is disabled.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '423':
+          description: Account is locked from too many failed attempts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: ACCOUNT_LOCKED, message: "Account locked until 2026-08-07T15:10:00Z after 5 failed attempts.", request_id: "req_01J9X..." } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/token/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new access/refresh pair
+      description: >
+        Implements rotation-with-reuse-detection: the presented refresh token is
+        revoked and replaced. If a token whose `replaced_by_token_id` is already
+        set is presented again, the entire `family_id` is revoked and every
+        session in that family is terminated.
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Refresh token invalid, expired, or already superseded (reuse detected — family revoked).
+          content:
+            application/json:
+              examples:
+                expired:
+                  value: { error: { code: TOKEN_EXPIRED, message: "Refresh token has expired.", request_id: "req_01J9X..." } }
+                reuse:
+                  value: { error: { code: TOKEN_REUSE_DETECTED, message: "This refresh token was already rotated. Its entire session family has been revoked.", request_id: "req_01J9X..." } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session and its refresh-token family
+      operationId: logout
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string, description: "Also revoke this refresh token's family explicitly." }
+      responses:
+        '204': { description: Session revoked. No content. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List the caller's active sessions
+      operationId: listMySessions
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/Session' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Auth]
+      summary: Revoke every session for the caller ("logout everywhere")
+      operationId: revokeAllMySessions
+      responses:
+        '204': { description: All sessions and refresh-token families revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionIdPath'
+    delete:
+      tags: [Auth]
+      summary: Revoke a specific session
+      description: Requires `session:delete` when revoking another user's session; a user may always revoke their own.
+      operationId: revokeSession
+      responses:
+        '204': { description: Session and its refresh-token family revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== ORGANIZATIONS ==============================
+  /organizations:
+    post:
+      tags: [Organizations]
+      summary: Create an organization (platform-admin only)
+      operationId: createOrganization
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrganizationCreate' }
+            example: { name: "Acme Corp", slug: "acme" }
+      responses:
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: "`slug` already in use."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /organizations/{organizationId}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationIdPath'
+    get:
+      tags: [Organizations]
+      summary: Get an organization
+      operationId: getOrganization
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Organizations]
+      summary: Update an organization
+      operationId: updateOrganization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrganizationUpdate' }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Organizations]
+      summary: Suspend or soft-delete an organization
+      description: Sets `status`; does not hard-delete (see `users.organization_id` `ON DELETE RESTRICT`).
+      operationId: deleteOrganization
+      responses:
+        '204': { description: Organization marked deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Organization still has active users; offboard them first.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  # ============================== USERS ==============================
+  /users:
+    get:
+      tags: [Users]
+      summary: List users in the caller's organization
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/UserStatus' }
+        - name: email
+          in: query
+          description: Exact-match filter (case-insensitive).
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Users]
+      summary: Create (invite) a user
+      operationId: createUser
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+            example: { email: "priya.nair@acme.com", username: "priya.nair", send_invite: true }
+      responses:
+        '201':
+          description: Created. If `send_invite` is true, `status` is `pending_verification` and no password is set.
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Email already exists in this organization.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    get:
+      tags: [Users]
+      summary: Get a user
+      operationId: getUser
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Users]
+      summary: Update a user
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Users]
+      summary: Soft-delete a user
+      description: Sets `deleted_at`; sessions and refresh tokens are revoked as a side effect. Audit and login history rows are preserved.
+      operationId: deleteUser
+      responses:
+        '204': { description: User deactivated. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{userId}/roles:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    get:
+      tags: [Users]
+      summary: List a user's direct role grants
+      operationId: listUserRoles
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/RoleGrant' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Users]
+      summary: Grant a role directly to a user
+      operationId: assignUserRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleGrantCreate' }
+            example: { role_id: "b6f1...", expires_at: "2026-08-07T18:00:00Z" }
+      responses:
+        '201': { description: Granted, content: { application/json: { schema: { $ref: '#/components/schemas/RoleGrant' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: User or role not found.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: User already holds this role.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/{userId}/roles/{roleId}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+      - $ref: '#/components/parameters/RoleIdPath'
+    delete:
+      tags: [Users]
+      summary: Revoke a direct role grant from a user
+      operationId: revokeUserRole
+      responses:
+        '204': { description: Revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{userId}/effective-permissions:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    get:
+      tags: [Users]
+      summary: Resolve a user's effective permissions
+      description: Union of permissions from direct, non-expired `user_roles` and every role granted via `group_roles` for groups the user belongs to.
+      operationId: getUserEffectivePermissions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EffectivePermissions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== GROUPS ==============================
+  /groups:
+    get:
+      tags: [Groups]
+      summary: List groups
+      operationId: listGroups
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: parent_group_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/Group' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Groups]
+      summary: Create a group
+      operationId: createGroup
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKeyHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupCreate' }
+            example: { name: "platform-team", description: "Owns Kubernetes and Terraform infra", parent_group_id: null }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: "`parent_group_id` does not exist."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Group name already exists in this organization.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /groups/{groupId}:
+    parameters: [ { $ref: '#/components/parameters/GroupIdPath' } ]
+    get:
+      tags: [Groups]
+      summary: Get a group
+      operationId: getGroup
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Groups]
+      summary: Update a group
+      operationId: updateGroup
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/GroupUpdate' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "`parent_group_id` would create a self-reference or a cycle."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Groups]
+      summary: Delete a group
+      description: Child groups (`parent_group_id`) are promoted to top-level; memberships and role grants are cascade-deleted.
+      operationId: deleteGroup
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /groups/{groupId}/members:
+    parameters: [ { $ref: '#/components/parameters/GroupIdPath' } ]
+    get:
+      tags: [Groups]
+      summary: List a group's members
+      operationId: listGroupMembers
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/GroupMember' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Groups]
+      summary: Add a member to a group
+      operationId: addGroupMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupMemberCreate' }
+      responses:
+        '201': { description: Added, content: { application/json: { schema: { $ref: '#/components/schemas/GroupMember' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Group or user not found.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: User is already a member.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /groups/{groupId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/GroupIdPath'
+      - $ref: '#/components/parameters/UserIdPath'
+    delete:
+      tags: [Groups]
+      summary: Remove a member from a group
+      operationId: removeGroupMember
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /groups/{groupId}/roles:
+    parameters: [ { $ref: '#/components/parameters/GroupIdPath' } ]
+    get:
+      tags: [Groups]
+      summary: List roles granted to a group
+      operationId: listGroupRoles
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/RoleGrant' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Groups]
+      summary: Grant a role to every member of a group
+      operationId: assignGroupRole
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RoleGrantCreate' } } }
+      responses:
+        '201': { description: Granted, content: { application/json: { schema: { $ref: '#/components/schemas/RoleGrant' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Group already holds this role.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /groups/{groupId}/roles/{roleId}:
+    parameters:
+      - $ref: '#/components/parameters/GroupIdPath'
+      - $ref: '#/components/parameters/RoleIdPath'
+    delete:
+      tags: [Groups]
+      summary: Revoke a role from a group
+      operationId: revokeGroupRole
+      responses:
+        '204': { description: Revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== ROLES ==============================
+  /roles:
+    get:
+      tags: [Roles]
+      summary: List roles visible to the caller's organization
+      description: Includes tenant-defined roles and system-wide roles (`organization_id` is `null`).
+      operationId: listRoles
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: is_system_role
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/Role' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Roles]
+      summary: Create a tenant-defined role
+      operationId: createRole
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKeyHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoleCreate' }
+            example: { name: "payments-oncall", description: "Read access to payments-service secrets during on-call rotation" }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Role name already exists in this organization.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /roles/{roleId}:
+    parameters: [ { $ref: '#/components/parameters/RoleIdPath' } ]
+    get:
+      tags: [Roles]
+      summary: Get a role
+      operationId: getRole
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Roles]
+      summary: Update a role
+      description: "System roles (`is_system_role: true`) cannot be modified through this endpoint."
+      operationId: updateRole
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RoleUpdate' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller lacks `role:write`, or the role is a system role.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Roles]
+      summary: Delete a role
+      description: Cascades to `role_permissions`, `user_roles`, `group_roles`, and `service_account_roles` for this role.
+      operationId: deleteRole
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /roles/{roleId}/permissions:
+    parameters: [ { $ref: '#/components/parameters/RoleIdPath' } ]
+    get:
+      tags: [Roles]
+      summary: List permissions granted by a role
+      operationId: listRolePermissions
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Permission' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Roles]
+      summary: Add a permission to a role
+      operationId: addRolePermission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RolePermissionCreate' }
+            example: { permission_id: "8f2e..." }
+      responses:
+        '201': { description: Added, content: { application/json: { schema: { $ref: '#/components/schemas/Permission' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Role or permission not found.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Role already grants this permission.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /roles/{roleId}/permissions/{permissionId}:
+    parameters:
+      - $ref: '#/components/parameters/RoleIdPath'
+      - $ref: '#/components/parameters/PermissionIdPath'
+    delete:
+      tags: [Roles]
+      summary: Remove a permission from a role
+      operationId: removeRolePermission
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== PERMISSIONS ==============================
+  /permissions:
+    get:
+      tags: [Permissions]
+      summary: List all system-defined permissions
+      description: Permissions are global and seeded by the platform; there is no create/update/delete endpoint (see design note in the schema doc).
+      operationId: listPermissions
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: resource
+          in: query
+          description: Filter to a single resource namespace, e.g. `secret`.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/Permission' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /permissions/{permissionId}:
+    parameters: [ { $ref: '#/components/parameters/PermissionIdPath' } ]
+    get:
+      tags: [Permissions]
+      summary: Get a permission
+      operationId: getPermission
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Permission' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== SECRETS ==============================
+  # Requires secrets:list/create/read/update/delete respectively — see
+  # each operation below. Every route also requires bearer auth (the
+  # global `security:` requirement at the top of this document).
+  /secrets:
+    get:
+      tags: [Secrets]
+      summary: List secrets (metadata only)
+      description: Requires secrets:list. Never returns a value, ciphertext, nonce, or key — see components.schemas.Secret.
+      operationId: listSecrets
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Secret' } }
+                  page: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Secrets]
+      summary: Create a secret
+      description: Requires secrets:create. The entire `data` object is encrypted as one unit — there is no partial/selective encryption of individual fields.
+      operationId: createSecret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SecretCreate' }
+            example: { path: "prod/example-service/db", data: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" } }
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: A secret already exists at this path.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /secrets/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+        description: >-
+          The secret's logical, hierarchical path, e.g. `prod/database`.
+          May contain `/` as a namespace separator — the entire trailing
+          segment is one identifier, never a nested sub-resource route,
+          and is never resolved against a filesystem. `.` and `..`
+          segments, empty segments, and out-of-range characters are
+          rejected (422).
+        example: prod/example-service/db
+    get:
+      tags: [Secrets]
+      summary: Read a secret's current or a specific historical version
+      description: >-
+        Requires secrets:read. This is the only Secrets endpoint whose
+        response contains a decrypted value — returned only because this
+        specific request already passed server-side authorization.
+      operationId: getSecret
+      parameters:
+        - name: version
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: A specific historical version. Omit for the current version. Versions are immutable and sequential starting at 1.
+      responses:
+        '200':
+          description: OK.
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecretValue' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    put:
+      tags: [Secrets]
+      summary: Create a new version of a secret
+      description: >-
+        Requires secrets:update. Always creates a new, immutable version —
+        never overwrites an existing one. Optimistic concurrency is
+        mandatory: If-Match must name the version this update expects to
+        be current.
+      operationId: updateSecret
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+          description: 'The version this update expects to still be current, e.g. "3". Required on every request — there is no way to update a secret without stating what version it is replacing.'
+          example: '"3"'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SecretUpdate' }
+            example: { data: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY_2" } }
+      responses:
+        '200':
+          description: A new version was created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: If-Match does not equal the secret's current version — re-read the current version and retry; never silently overwritten.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Secrets]
+      summary: Soft-delete a secret
+      description: Requires secrets:delete. Ciphertext is retained (soft delete only — see components.schemas.Secret); a normal GET afterward returns 404.
+      operationId: deleteSecret
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== SERVICE ACCOUNTS ==============================
+  /service-accounts:
+    get:
+      tags: [Service Accounts]
+      summary: List service accounts
+      operationId: listServiceAccounts
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ServiceAccountStatus' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/ServiceAccount' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Service Accounts]
+      summary: Create a service account
+      operationId: createServiceAccount
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKeyHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ServiceAccountCreate' }
+            example: { name: "ci-payments-integration-tests", description: "GitHub Actions workflow for the payments service" }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceAccount' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already exists in this organization.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /service-accounts/{serviceAccountId}:
+    parameters: [ { $ref: '#/components/parameters/ServiceAccountIdPath' } ]
+    get:
+      tags: [Service Accounts]
+      summary: Get a service account
+      operationId: getServiceAccount
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceAccount' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Service Accounts]
+      summary: Update a service account
+      operationId: updateServiceAccount
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ServiceAccountUpdate' } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceAccount' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Service Accounts]
+      summary: Delete a service account
+      description: Cascades to its role grants and revokes every API key it owns.
+      operationId: deleteServiceAccount
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /service-accounts/{serviceAccountId}/roles:
+    parameters: [ { $ref: '#/components/parameters/ServiceAccountIdPath' } ]
+    get:
+      tags: [Service Accounts]
+      summary: List roles granted to a service account
+      operationId: listServiceAccountRoles
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/RoleGrant' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Service Accounts]
+      summary: Grant a role to a service account
+      operationId: assignServiceAccountRole
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RoleGrantCreate' } } }
+      responses:
+        '201': { description: Granted, content: { application/json: { schema: { $ref: '#/components/schemas/RoleGrant' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Service account already holds this role.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /service-accounts/{serviceAccountId}/roles/{roleId}:
+    parameters:
+      - $ref: '#/components/parameters/ServiceAccountIdPath'
+      - $ref: '#/components/parameters/RoleIdPath'
+    delete:
+      tags: [Service Accounts]
+      summary: Revoke a role from a service account
+      operationId: revokeServiceAccountRole
+      responses:
+        '204': { description: Revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /service-accounts/{serviceAccountId}/token:
+    parameters: [ { $ref: '#/components/parameters/ServiceAccountIdPath' } ]
+    post:
+      tags: [Service Accounts]
+      summary: Exchange an API key for a short-lived access token
+      description: >
+        Client-credentials-style exchange. The caller authenticates this specific
+        request with `X-Api-Key` (a key owned by this service account); on success,
+        a JWT access token scoped to that key's permissions is minted. No refresh
+        token or session row is created — machine callers repeat this exchange.
+      operationId: mintServiceAccountToken
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                requested_ttl_seconds: { type: integer, minimum: 60, maximum: 3600, default: 900 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceTokenResponse' }
+        '401':
+          description: API key missing, invalid, revoked, or expired.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403':
+          description: API key does not belong to this service account, or the service account is disabled.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # ============================== API KEYS ==============================
+  /api-keys:
+    get:
+      tags: [API Keys]
+      summary: List API keys
+      description: Non-privileged callers see only keys they own; `api_key:read` on another principal requires an admin role.
+      operationId: listApiKeys
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: owner_user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: owner_service_account_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ApiKeyStatus' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/ApiKey' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [API Keys]
+      summary: Create an API key
+      description: >
+        The response's `secret` field is the only time the raw key is ever
+        returned — only its hash is persisted. Exactly one of `owner_user_id` /
+        `owner_service_account_id` must be set, matching the `ck_api_keys_single_owner`
+        check constraint.
+      operationId: createApiKey
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKeyHeader' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApiKeyCreate' }
+            example:
+              name: "ci-integration-tests"
+              owner_service_account_id: "3fd2a9c1-..."
+              expires_at: "2026-11-01T00:00:00Z"
+              permission_ids: ["8f2e...", "a013..."]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Owner (user or service account) not found.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Both or neither of `owner_user_id` / `owner_service_account_id` were set.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: { code: OWNER_CONFLICT, message: "Exactly one of owner_user_id or owner_service_account_id is required.", request_id: "req_01J9X..." } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api-keys/{apiKeyId}:
+    parameters: [ { $ref: '#/components/parameters/ApiKeyIdPath' } ]
+    get:
+      tags: [API Keys]
+      summary: Get an API key (metadata only — never the secret)
+      operationId: getApiKey
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ApiKey' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [API Keys]
+      summary: Revoke an API key
+      operationId: revokeApiKey
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 255, example: "rotated after suspected exposure" }
+      responses:
+        '204': { description: Revoked immediately; already-issued short-lived tokens from it are unaffected until they expire. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api-keys/{apiKeyId}/permissions:
+    parameters: [ { $ref: '#/components/parameters/ApiKeyIdPath' } ]
+    get:
+      tags: [API Keys]
+      summary: List scopes attached directly to a key
+      operationId: listApiKeyPermissions
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Permission' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [API Keys]
+      summary: Add a scope to a key
+      description: A key's own scopes are independent of its owner's roles — they narrow, never widen, what the key can do.
+      operationId: addApiKeyPermission
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RolePermissionCreate' } } }
+      responses:
+        '201': { description: Added, content: { application/json: { schema: { $ref: '#/components/schemas/Permission' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Key already carries this scope.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /api-keys/{apiKeyId}/permissions/{permissionId}:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyIdPath'
+      - $ref: '#/components/parameters/PermissionIdPath'
+    delete:
+      tags: [API Keys]
+      summary: Remove a scope from a key
+      operationId: removeApiKeyPermission
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== AUDIT LOGS ==============================
+  /audit-logs:
+    get:
+      tags: [Audit Logs]
+      summary: Query the audit log
+      description: Read-only. Requires `audit_log:read`. `metadata` never contains secret values — only descriptive context.
+      operationId: listAuditLogs
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: actor_type
+          in: query
+          schema: { $ref: '#/components/schemas/AuditActorType' }
+        - name: actor_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: resource_type
+          in: query
+          schema: { type: string }
+        - name: resource_id
+          in: query
+          schema: { type: string }
+        - name: result
+          in: query
+          schema: { $ref: '#/components/schemas/AuditResult' }
+        - name: occurred_after
+          in: query
+          schema: { type: string, format: date-time }
+        - name: occurred_before
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } } }
+        '400':
+          description: "`occurred_after` is after `occurred_before`."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /audit-logs/{auditLogId}:
+    parameters: [ { $ref: '#/components/parameters/AuditLogIdPath' } ]
+    get:
+      tags: [Audit Logs]
+      summary: Get a single audit log entry
+      operationId: getAuditLog
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AuditLogEntry' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ============================== LOGIN HISTORY ==============================
+  /login-history:
+    get:
+      tags: [Login History]
+      summary: Query login attempt history
+      description: Read-only. A user with only `login_history:read_own` sees their own attempts; `login_history:read` is required to see the organization's.
+      operationId: listLoginHistory
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/LoginStatus' }
+        - name: ip_address
+          in: query
+          schema: { type: string }
+        - name: occurred_after
+          in: query
+          schema: { type: string, format: date-time }
+        - name: occurred_before
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PagedResponse'
+                  - type: object
+                    properties: { data: { type: array, items: { $ref: '#/components/schemas/LoginHistoryEntry' } } }
+        '400':
+          description: "`occurred_after` is after `occurred_before`."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from `/auth/login`, `/auth/token/refresh`, or `/service-accounts/{id}/token`.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Raw API key, used only to call `/service-accounts/{id}/token` (or directly on resource endpoints the key's scopes allow).
+
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    CursorParam:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor from a previous response's `page.next_cursor`.
+      schema: { type: string }
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      description: Replaying the same key returns the original creation response instead of creating a duplicate.
+      schema: { type: string, maxLength: 255 }
+    OrganizationIdPath:
+      name: organizationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserIdPath:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    GroupIdPath:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RoleIdPath:
+      name: roleId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PermissionIdPath:
+      name: permissionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ServiceAccountIdPath:
+      name: serviceAccountId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ApiKeyIdPath:
+      name: apiKeyId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionIdPath:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AuditLogIdPath:
+      name: auditLogId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed request (invalid JSON, wrong content type).
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing, invalid, or expired credentials.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: UNAUTHENTICATED, message: "Access token is missing or invalid.", request_id: "req_01J9X..." } }
+    Forbidden:
+      description: Authenticated, but the policy engine denied this action.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: FORBIDDEN, message: "Missing required permission: user:write.", request_id: "req_01J9X..." } }
+    NotFound:
+      description: Resource does not exist, or is outside the caller's organization.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: NOT_FOUND, message: "No such resource.", request_id: "req_01J9X..." } }
+    ValidationError:
+      description: Field-level validation failure.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: "Request failed validation."
+              details:
+                - { field: "email", issue: "must be a valid email address" }
+                - { field: "password", issue: "must be at least 12 characters and include upper, lower, digit, and symbol" }
+              request_id: "req_01J9X..."
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After: { schema: { type: integer }, description: Seconds until the caller may retry. }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: RATE_LIMITED, message: "Too many login attempts. Try again in 42 seconds.", request_id: "req_01J9X..." } }
+    InternalError:
+      description: Unexpected server error.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+
+    # ---------- Error envelope ----------
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: '#/components/schemas/ErrorBody' }
+    ErrorBody:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum:
+            - MALFORMED_REQUEST
+            - VALIDATION_ERROR
+            - UNAUTHENTICATED
+            - INVALID_CREDENTIALS
+            - MFA_REQUIRED
+            - ACCOUNT_LOCKED
+            - ACCOUNT_DISABLED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - OWNER_CONFLICT
+            - TOKEN_EXPIRED
+            - TOKEN_REUSE_DETECTED
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+        message: { type: string }
+        details:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/FieldError' }
+        request_id: { type: string, example: "req_01J9X8V2QYUR6EZC1G5N3B7K4M" }
+    FieldError:
+      type: object
+      required: [field, issue]
+      properties:
+        field: { type: string }
+        issue: { type: string }
+
+    # ---------- Pagination ----------
+    PageMeta:
+      type: object
+      required: [has_more, limit]
+      properties:
+        next_cursor: { type: string, nullable: true }
+        has_more: { type: boolean }
+        limit: { type: integer }
+    PagedResponse:
+      type: object
+      required: [data, page]
+      properties:
+        data: { type: array, items: {} }
+        page: { $ref: '#/components/schemas/PageMeta' }
+
+    # ---------- Enums shared with the DB ----------
+    UserStatus: { type: string, enum: [active, disabled, locked, pending_verification] }
+    ServiceAccountStatus: { type: string, enum: [active, disabled] }
+    ApiKeyStatus: { type: string, enum: [active, revoked, expired] }
+    LoginStatus: { type: string, enum: [success, failure_bad_password, failure_mfa, failure_locked, failure_disabled, failure_unknown_identity, failure_other] }
+    AuthMethod: { type: string, enum: [password, sso_oidc, sso_saml, api_key, service_account_token, webauthn] }
+    AuditActorType: { type: string, enum: [user, service_account, api_key, system] }
+    AuditResult: { type: string, enum: [success, failure, denied] }
+
+    # ---------- Auth ----------
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, minLength: 1, maxLength: 128, writeOnly: true }
+        device_fingerprint: { type: string, maxLength: 255 }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    TokenResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, session_id]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: Access token lifetime in seconds. }
+        session_id: { type: string, format: uuid }
+    ServiceTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        ip_address: { type: string, nullable: true }
+        user_agent: { type: string, nullable: true }
+        device_fingerprint: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        last_active_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
+    # ---------- Organizations ----------
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [active, suspended, deleted] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    OrganizationCreate:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        slug: { type: string, pattern: '^[a-z0-9]+(-[a-z0-9]+)*$', minLength: 2, maxLength: 100 }
+    OrganizationUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        status: { type: string, enum: [active, suspended, deleted] }
+
+    # ---------- Users ----------
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        username: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        mfa_enabled: { type: boolean }
+        email_verified_at: { type: string, format: date-time, nullable: true }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserCreate:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        username: { type: string, maxLength: 100 }
+        password:
+          type: string
+          writeOnly: true
+          minLength: 12
+          maxLength: 128
+          pattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{12,128}$'
+          description: Omit when the user will authenticate via SSO only.
+        send_invite: { type: boolean, default: false, description: "If true, ignores `password` and emails a set-password link; status becomes pending_verification." }
+    UserUpdate:
+      type: object
+      properties:
+        username: { type: string, maxLength: 100, nullable: true }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        mfa_enabled: { type: boolean }
+
+    # ---------- Role grants (shared shape for user/group/service-account) ----------
+    RoleGrantCreate:
+      type: object
+      required: [role_id]
+      properties:
+        role_id: { type: string, format: uuid }
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Only meaningful on direct user grants (JIT / time-bound access); ignored for group and service-account grants.
+    RoleGrant:
+      type: object
+      properties:
+        role_id: { type: string, format: uuid }
+        role_name: { type: string }
+        assigned_by: { type: string, format: uuid, nullable: true }
+        assigned_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+
+    EffectivePermissions:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        permissions:
+          type: array
+          items: { type: string, example: "secret:read" }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              permission: { type: string }
+              via: { type: string, example: "group:platform-team → role:payments-oncall" }
+
+    # ---------- Groups ----------
+    Group:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        parent_group_id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    GroupCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        description: { type: string, maxLength: 500 }
+        parent_group_id: { type: string, format: uuid, nullable: true }
+    GroupUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        description: { type: string, maxLength: 500, nullable: true }
+        parent_group_id: { type: string, format: uuid, nullable: true }
+    GroupMemberCreate:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string, format: uuid }
+    GroupMember:
+      type: object
+      properties:
+        group_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        added_by: { type: string, format: uuid, nullable: true }
+        added_at: { type: string, format: date-time }
+
+    # ---------- Roles & Permissions ----------
+    Role:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid, nullable: true, description: "null for system-wide roles" }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        is_system_role: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RoleCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 500 }
+    RoleUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 500, nullable: true }
+    RolePermissionCreate:
+      type: object
+      required: [permission_id]
+      properties:
+        permission_id: { type: string, format: uuid }
+    Permission:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        resource: { type: string }
+        action: { type: string }
+        name: { type: string, example: "secret:read" }
+        description: { type: string, nullable: true }
+
+    # ---------- Secrets ----------
+    SecretCreate:
+      type: object
+      required: [path, data]
+      properties:
+        path:
+          type: string
+          description: Hierarchical secret path. See /secrets/{path}'s own parameter description for the exact rules.
+          example: prod/example-service/db
+        data:
+          type: object
+          additionalProperties: { type: string }
+          description: The entire structured secret value — encrypted as one unit, never per-field.
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" }
+    SecretUpdate:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: { type: string }
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY_2" }
+    Secret:
+      type: object
+      description: >-
+        Secret metadata — the response shape for list/create/update. Never
+        contains a value, ciphertext, nonce, or encryption key; no field on
+        this schema could hold one.
+      properties:
+        path: { type: string, example: prod/example-service/db }
+        version: { type: integer, example: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SecretValue:
+      type: object
+      description: >-
+        A decrypted secret value — returned only by GET /secrets/{path},
+        and only after that request already passed server-side
+        secrets:read authorization.
+      properties:
+        path: { type: string, example: prod/example-service/db }
+        version: { type: integer, example: 1 }
+        data:
+          type: object
+          additionalProperties: { type: string }
+          example: { username: "example_user", password: "REPLACE_ME_EXAMPLE_ONLY", host: "db.internal.example" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    # ---------- Service Accounts ----------
+    ServiceAccount:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/ServiceAccountStatus' }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ServiceAccountCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        description: { type: string, maxLength: 500 }
+    ServiceAccountUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        description: { type: string, maxLength: 500, nullable: true }
+        status: { $ref: '#/components/schemas/ServiceAccountStatus' }
+
+    # ---------- API Keys ----------
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid, nullable: true }
+        owner_service_account_id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        key_prefix: { type: string, example: "sk_live_ex01" }
+        status: { $ref: '#/components/schemas/ApiKeyStatus' }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        revoked_reason: { type: string, nullable: true }
+    ApiKeyCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 150 }
+        owner_user_id: { type: string, format: uuid, nullable: true }
+        owner_service_account_id: { type: string, format: uuid, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true, description: "Omit for a non-expiring key (discouraged outside break-glass use)." }
+        permission_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Optional scopes narrower than the owner's roles.
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          required: [secret]
+          properties:
+            secret: { type: string, description: "Raw key — shown exactly once, never retrievable again.", example: "sk_live_<raw-secret-shown-once-only>" }
+
+    # ---------- Audit / Login history ----------
+    AuditLogEntry:
+      type: object
+      properties:
+        id: { type: string }
+        organization_id: { type: string, format: uuid, nullable: true }
+        actor_type: { $ref: '#/components/schemas/AuditActorType' }
+        actor_id: { type: string, format: uuid, nullable: true, description: "Polymorphic — resolve against users/service_accounts/api_keys by actor_type. null when actor_type is system." }
+        action: { type: string, example: "role.assign" }
+        resource_type: { type: string, nullable: true }
+        resource_id: { type: string, nullable: true }
+        result: { $ref: '#/components/schemas/AuditResult' }
+        ip_address: { type: string, nullable: true }
+        metadata: { type: object, nullable: true, additionalProperties: true }
+        prev_hash: { type: string, nullable: true }
+        record_hash: { type: string }
+        occurred_at: { type: string, format: date-time }
+    LoginHistoryEntry:
+      type: object
+      properties:
+        id: { type: string }
+        organization_id: { type: string, format: uuid, nullable: true }
+        user_id: { type: string, format: uuid, nullable: true }
+        attempted_identifier: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/LoginStatus' }
+        auth_method: { $ref: '#/components/schemas/AuthMethod' }
+        ip_address: { type: string, nullable: true }
+        session_id: { type: string, format: uuid, nullable: true }
+        occurred_at: { type: string, format: date-time }

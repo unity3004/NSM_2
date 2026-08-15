@@ -1,0 +1,1 @@
+DELETE FROM secret_policy_rule_actions WHERE rule_id = '00000000-0000-4000-9000-000000000201' AND action = 'rollback';

@@ -1,0 +1,9 @@
+-- PostgreSQL does not support removing a value from an enum type — there
+-- is no DROP VALUE. A true rollback of this migration would require
+-- recreating secret_policy_action without 'rollback' (rename the old
+-- type, create a new one, rewrite every secret_policy_rule_actions row,
+-- drop the old type) — significant, data-destructive surgery for a
+-- migration this codebase has no operational need to ever actually roll
+-- back. Documented as a deliberate no-op, the same way this schema
+-- already accepts other genuinely irreversible-by-design migrations
+-- rather than pretending a shallow "down" exists.

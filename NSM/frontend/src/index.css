@@ -1,0 +1,559 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.5 0.19 262);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.5 0.19 262);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --radius: 0.5rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+}
+
+/* ==========================================================================
+   KANZ design tokens — the single source of truth for the "Obsidian +
+   Cyan" brand palette. Declared on bare :root (not .dark) so they're real,
+   inspectable CSS custom properties usable from anywhere (inline styles,
+   the KanzLogo/KanzSplash SVG components, raw CSS below) regardless of
+   theme class — the shadcn semantic variables in .dark above reference
+   these rather than restating literals, and every one of the names below
+   matches the spec's own --kanz-* naming exactly.
+   ========================================================================== */
+:root {
+    --kanz-bg: #05080d;
+    --kanz-surface: #0b1118;
+    --kanz-surface-elevated: #111a24;
+    --kanz-border: #1e2936;
+    --kanz-primary: #22d3ee;
+    --kanz-primary-glow: #67e8f9;
+    --kanz-secondary: #0ea5e9;
+    --kanz-success: #34d399;
+    --kanz-warning: #fbbf24;
+    --kanz-danger: #fb7185;
+    --kanz-text: #f8fafc;
+    --kanz-text-muted: #94a3b8;
+
+    /* Spacing/radius/shadow/transition tokens, additive to the existing
+     * --radius-* scale (@theme inline above already derives sm..4xl from
+     * --radius) and Tailwind's own default spacing scale — not a
+     * replacement for either, just the handful of named values this
+     * brand's shell (glows, elevation, motion) needs repeatedly. */
+    --kanz-space-xs: 0.5rem;
+    --kanz-space-sm: 0.75rem;
+    --kanz-space-md: 1rem;
+    --kanz-space-lg: 1.5rem;
+    --kanz-space-xl: 2rem;
+    --kanz-radius-sm: 0.375rem;
+    --kanz-radius-md: 0.5rem;
+    --kanz-radius-lg: 0.75rem;
+    --kanz-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+    --kanz-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+    --kanz-shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+    --kanz-glow-sm: 0 0 12px -2px color-mix(in oklab, var(--kanz-primary) 55%, transparent);
+    --kanz-glow-md: 0 0 24px -4px color-mix(in oklab, var(--kanz-primary) 60%, transparent);
+    --kanz-transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+    --kanz-transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+    --kanz-transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@theme inline {
+    /* Registers the same tokens as Tailwind v4 theme colors, so ordinary
+     * utility classes (bg-kanz-primary, text-kanz-text-muted,
+     * border-kanz-border, ...) are available throughout the app without
+     * any component reaching for a raw var(--kanz-*) or hex value. */
+    --color-kanz-bg: var(--kanz-bg);
+    --color-kanz-surface: var(--kanz-surface);
+    --color-kanz-surface-elevated: var(--kanz-surface-elevated);
+    --color-kanz-border: var(--kanz-border);
+    --color-kanz-primary: var(--kanz-primary);
+    --color-kanz-primary-glow: var(--kanz-primary-glow);
+    --color-kanz-secondary: var(--kanz-secondary);
+    --color-kanz-success: var(--kanz-success);
+    --color-kanz-warning: var(--kanz-warning);
+    --color-kanz-danger: var(--kanz-danger);
+    --color-kanz-text: var(--kanz-text);
+    --color-kanz-text-muted: var(--kanz-text-muted);
+}
+
+.dark {
+    /* KANZ "Obsidian + Cyan" dark theme — the app renders with
+     * <html class="dark"> unconditionally (see index.html; there is no
+     * light-mode toggle), so this block is the entire real theme. Values
+     * are drawn directly from the --kanz-* brand tokens below rather than
+     * restated as literals, so the palette has exactly one source of
+     * truth. */
+    --background: var(--kanz-bg);
+    --foreground: var(--kanz-text);
+    --card: var(--kanz-surface);
+    --card-foreground: var(--kanz-text);
+    --popover: var(--kanz-surface-elevated);
+    --popover-foreground: var(--kanz-text);
+    --primary: var(--kanz-primary);
+    --primary-foreground: var(--kanz-bg);
+    --secondary: var(--kanz-surface-elevated);
+    --secondary-foreground: var(--kanz-text);
+    --muted: var(--kanz-surface-elevated);
+    --muted-foreground: var(--kanz-text-muted);
+    --accent: var(--kanz-surface-elevated);
+    --accent-foreground: var(--kanz-text);
+    --destructive: var(--kanz-danger);
+    --border: var(--kanz-border);
+    --input: var(--kanz-border);
+    --ring: var(--kanz-primary);
+    --chart-1: var(--kanz-primary);
+    --chart-2: var(--kanz-secondary);
+    --chart-3: var(--kanz-success);
+    --chart-4: var(--kanz-warning);
+    --chart-5: var(--kanz-danger);
+    /* Sidebar sits one step above the base background (surface, not
+     * elevated-surface) so it reads as a distinct panel without competing
+     * with popovers/dialogs for "most elevated" surface in the hierarchy. */
+    --sidebar: var(--kanz-surface);
+    --sidebar-foreground: var(--kanz-text);
+    --sidebar-primary: var(--kanz-primary);
+    --sidebar-primary-foreground: var(--kanz-bg);
+    --sidebar-accent: var(--kanz-surface-elevated);
+    /* Active/hovered nav item text picks up brand cyan directly — this is
+     * the one deliberate exception to "cyan is an accent, not everywhere":
+     * SidebarMenuButton's own data-active/hover styles (ui/sidebar.tsx)
+     * already key off this variable, so it's how the sidebar's "active
+     * state ... subtle cyan indicator" requirement is met without
+     * touching that primitive component at all. */
+    --sidebar-accent-foreground: var(--kanz-primary);
+    --sidebar-border: var(--kanz-border);
+    --sidebar-ring: var(--kanz-primary);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+
+/* ==========================================================================
+   KANZ sidebar navigation — active state, hover motion, and the Dynamic
+   Leases live indicator. All target ui/sidebar.tsx's own data-active/
+   data-slot attributes rather than editing that primitive, so the shadcn
+   component stays untouched and this stays the one place the "premium
+   sidebar" treatment is defined.
+   ========================================================================== */
+[data-slot="sidebar-menu-button"] {
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+[data-slot="sidebar-menu-button"] svg {
+  transition: transform 180ms ease, color 180ms ease;
+}
+/* Hover: background is already handled by the primitive's own
+ * hover:bg-sidebar-accent — this adds the brief's other two hover cues,
+ * a small icon shift and a just-visible border, on top of it. */
+[data-slot="sidebar-menu-button"]:hover:not([data-active="true"]) {
+  border-color: color-mix(in oklab, var(--kanz-primary) 20%, transparent);
+}
+[data-slot="sidebar-menu-button"]:hover svg {
+  transform: translateX(2px);
+}
+
+/* Active: a subtle cyan-tinted background (not the neutral elevated
+ * surface hover uses) plus a thin cyan indicator on the leading edge and
+ * a very restrained glow — "an active security channel," not a bright
+ * block. */
+[data-slot="sidebar-menu-button"][data-active="true"] {
+  position: relative;
+  background: color-mix(in oklab, var(--kanz-primary) 10%, transparent);
+}
+[data-slot="sidebar-menu-button"][data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: -0.5rem;
+  top: 15%;
+  bottom: 15%;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--kanz-primary);
+  box-shadow: var(--kanz-glow-sm);
+}
+/* Collapsed (icon-only) rail has no room for an inset indicator bar. */
+[data-collapsible="icon"] [data-slot="sidebar-menu-button"][data-active="true"]::before {
+  display: none;
+}
+
+/* Dynamic Leases live indicator — a small dot, not a fabricated count,
+ * shown only when AppLayout's own real GET /v1/leases call found at
+ * least one lease with status "active" (see the isLeasesActive check in
+ * AppLayout.tsx). Pulses gently; reduced-motion below freezes it solid
+ * rather than hiding it, since the dot's presence/absence is itself real
+ * information. */
+@keyframes kanz-lease-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, var(--kanz-primary) 55%, transparent); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 3px color-mix(in oklab, var(--kanz-primary) 0%, transparent); }
+}
+.kanz-lease-dot {
+  animation: kanz-lease-pulse 2.4s ease-in-out infinite;
+}
+
+/* ==========================================================================
+   KANZ logo motion. Kept centralized here rather than in component-level
+   <style> tags so every brand surface (sidebar, login, splash) shares one
+   definition of "what KANZ motion looks like."
+
+   kanz-fade-up (below) is the *splash sequence's* text choreography — the
+   wordmark/tagline fading up in KanzSplash — not part of the mark itself,
+   so it's untouched by the logo redesign.
+
+   Everything above it in this block is the "Living Security Core" mark:
+   a continuously, seamlessly looping fluid core + energy-field ring +
+   a few orbiting particles. There is deliberately no "in" animation and
+   no completion state — every rule below is `infinite`, and every
+   `animation-delay` on the actual elements (KanzLogo.tsx doesn't set
+   one; see the negative delays below) starts each layer already
+   mid-cycle, so there is nothing that reads as "the logo just finished
+   loading." Durations are intentionally non-integer-multiples of each
+   other (5.4s / 6.2s / 7.8s / 5.6s / 6.9s / 4.9s) so the combined motion
+   practically never repeats identically within a short viewing window.
+   ========================================================================== */
+@keyframes kanz-core-a-morph {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.8); opacity: 0.4; }
+}
+@keyframes kanz-core-b-morph {
+  0%, 100% { transform: rotate(45deg) scale(1); opacity: 0.55; }
+  50% { transform: rotate(72deg) scale(0.8); opacity: 1; }
+}
+@keyframes kanz-ring-a-flow {
+  0%, 100% { rx: 15; ry: 13.5; transform: rotate(0deg); }
+  35% { rx: 12.5; ry: 16.5; transform: rotate(35deg); }
+  70% { rx: 16.5; ry: 12; transform: rotate(-18deg); }
+}
+@keyframes kanz-ring-b-flow {
+  0%, 100% { rx: 12.5; ry: 14.5; transform: rotate(0deg); }
+  40% { rx: 15.5; ry: 11.5; transform: rotate(-28deg); }
+  75% { rx: 11; ry: 15.5; transform: rotate(20deg); }
+}
+/* Rotate + scale, both anchored at the true center (24px 24px), not the
+ * particle's own position — scaling a point already offset from that
+ * origin moves it closer to/further from center along its current
+ * angle "for free," which is what reads as a particle drifting in
+ * toward the core (shrinking, dimming — "merging") and back out again,
+ * without a second, separately-animated radius property. */
+@keyframes kanz-particle-1-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.9; }
+  30% { transform: rotate(110deg) scale(1.1); opacity: 1; }
+  48% { transform: rotate(150deg) scale(0.25); opacity: 0.3; }
+  65% { transform: rotate(190deg) scale(1); opacity: 0.9; }
+  100% { transform: rotate(360deg) scale(1); opacity: 0.9; }
+}
+@keyframes kanz-particle-2-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.75; }
+  40% { transform: rotate(-130deg) scale(0.3); opacity: 0.25; }
+  60% { transform: rotate(-190deg) scale(1); opacity: 0.85; }
+  100% { transform: rotate(-360deg) scale(1); opacity: 0.75; }
+}
+@keyframes kanz-particle-3-move {
+  0% { transform: rotate(0deg) scale(1); opacity: 0.8; }
+  55% { transform: rotate(160deg) scale(1.05); opacity: 0.95; }
+  72% { transform: rotate(210deg) scale(0.2); opacity: 0.2; }
+  100% { transform: rotate(360deg) scale(1); opacity: 0.8; }
+}
+@keyframes kanz-fade-up {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.kanz-core-a {
+  transform-origin: 24px 24px;
+  animation: kanz-core-a-morph 5.4s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+}
+.kanz-core-b {
+  transform-origin: 24px 24px;
+  animation: kanz-core-b-morph 5.4s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+}
+.kanz-ring-a {
+  transform-origin: 24px 24px;
+  animation: kanz-ring-a-flow 6.2s ease-in-out infinite;
+}
+.kanz-ring-b {
+  transform-origin: 24px 24px;
+  animation: kanz-ring-b-flow 7.8s ease-in-out infinite;
+}
+.kanz-particle-dot-1 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-1-move 5.6s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -1.3s;
+}
+.kanz-particle-dot-2 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-2-move 6.9s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -3.1s;
+}
+.kanz-particle-dot-3 {
+  transform-origin: 24px 24px;
+  animation: kanz-particle-3-move 4.9s cubic-bezier(0.45, 0, 0.15, 1) infinite;
+  animation-delay: -2.4s;
+}
+/* Large variant only: a restrained outer glow ("stronger glow" for the
+ * login/splash-scale mark) — never applied to the sidebar's compact
+ * treatment, which the brief explicitly asks to keep glow reduced. */
+.kanz-logo-large {
+  filter: drop-shadow(0 0 7px color-mix(in oklab, var(--kanz-primary-glow) 40%, transparent));
+}
+
+.kanz-splash-wordmark {
+  animation: kanz-fade-up 0.3s ease-out 1.15s both;
+}
+.kanz-splash-tagline {
+  animation: kanz-fade-up 0.3s ease-out 1.4s both;
+}
+
+/* ==========================================================================
+   KANZ login experience — background depth, the ambient security-node
+   network (SecurityCoreField.tsx), and cross-panel focus reactivity. All
+   scoped to AuthLayout only via the classes below; nothing here affects
+   any other screen.
+   ========================================================================== */
+.kanz-auth-bg {
+  background-color: var(--kanz-bg);
+  background-image:
+    radial-gradient(55% 50% at 12% 15%, color-mix(in oklab, var(--kanz-primary) 9%, transparent), transparent 70%),
+    radial-gradient(50% 45% at 88% 85%, color-mix(in oklab, var(--kanz-secondary) 7%, transparent), transparent 70%),
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--kanz-border) 35%, transparent) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--kanz-border) 35%, transparent) 0 1px, transparent 1px 64px);
+}
+
+/* Cross-panel reactivity: the left visual brightens very slightly while
+ * any real form input on the page is focused — pure CSS (:has on the
+ * shared ancestor), no state threading between LoginForm and AuthLayout,
+ * so there is zero risk to authentication behavior. */
+.kanz-auth-shell:has(input:focus) .kanz-security-visual {
+  filter: brightness(1.12);
+  transition: filter 300ms ease;
+}
+.kanz-security-visual {
+  transition: filter 300ms ease;
+}
+
+/* ==========================================================================
+   Security Core Field — the four interactive capability nodes
+   (SecurityCoreField.tsx). Structure per node: .kanz-node (the real,
+   focusable <g>) contains .kanz-node-shape / .kanz-node-halo /
+   .kanz-node-label; a sibling .kanz-line--<key> is its connecting line;
+   .kanz-core-response wraps the KanzLogo itself (see AuthLayout.tsx).
+   ========================================================================== */
+@keyframes kanz-node-idle {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.04); }
+}
+.kanz-node {
+  cursor: default;
+  animation: kanz-node-idle 3.6s ease-in-out infinite;
+  transform-origin: center;
+}
+.kanz-node:focus-visible {
+  outline: 2px solid var(--kanz-primary);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.kanz-node-shape {
+  transform-origin: center;
+  transition: transform 200ms ease, filter 200ms ease;
+}
+.kanz-node-label {
+  transition: fill 200ms ease, opacity 200ms ease;
+}
+.kanz-node-halo {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+/* Hovering/focusing a node: it scales up (~1.2x), its glow halo fades in,
+ * and its label brightens from muted to full text color — using :hover
+ * and plain :focus (not just :focus-visible) so touch-tap feedback works
+ * too, per the brief's own "provide an appropriate tap interaction." */
+.kanz-node:hover .kanz-node-shape,
+.kanz-node:focus .kanz-node-shape {
+  transform: scale(1.2);
+  filter: drop-shadow(0 0 6px var(--kanz-primary-glow));
+}
+.kanz-node:hover .kanz-node-halo,
+.kanz-node:focus .kanz-node-halo {
+  opacity: 0.3;
+}
+.kanz-node:hover .kanz-node-label,
+.kanz-node:focus .kanz-node-label {
+  fill: var(--kanz-text);
+}
+
+.kanz-line {
+  transition: opacity 200ms ease, stroke-width 200ms ease;
+}
+@keyframes kanz-line-signal {
+  to { stroke-dashoffset: -20; }
+}
+/* One rule per node: hovering/focusing a node brightens *only its own*
+ * line and sends a slow dash traveling along it — "a signal traveling
+ * through the architecture," not a laser (long, slow-moving dashes at a
+ * still-low peak opacity). :has() on the shared <svg> is what lets a
+ * hover on one <g> reach a sibling <line> without any JS. */
+.kanz-security-field:has(.kanz-node--identity:hover, .kanz-node--identity:focus) .kanz-line--identity,
+.kanz-security-field:has(.kanz-node--secrets:hover, .kanz-node--secrets:focus) .kanz-line--secrets,
+.kanz-security-field:has(.kanz-node--leases:hover, .kanz-node--leases:focus) .kanz-line--leases,
+.kanz-security-field:has(.kanz-node--audit:hover, .kanz-node--audit:focus) .kanz-line--audit {
+  opacity: 0.65;
+  stroke-width: 1.25;
+  animation: kanz-line-signal 1.4s linear infinite;
+}
+
+/* The KANZ core itself responding to ANY node — "this capability is
+ * connected to the core," never a dramatic reaction. .kanz-core-response
+ * wraps just the KanzLogo (not the nodes, not the whole field), so this
+ * stays a restrained, separate effect from each node's own hover state. */
+.kanz-core-response {
+  transition: filter 250ms ease;
+}
+.kanz-security-field:has(.kanz-node:hover, .kanz-node:focus) ~ .kanz-core-response {
+  filter: brightness(1.1) drop-shadow(0 0 10px color-mix(in oklab, var(--kanz-primary-glow) 45%, transparent));
+}
+
+@keyframes kanz-atmosphere-drift {
+  0% { transform: translateY(0); opacity: 0; }
+  15% { opacity: var(--kanz-particle-opacity, 0.35); }
+  85% { opacity: var(--kanz-particle-opacity, 0.35); }
+  100% { transform: translateY(-28px); opacity: 0; }
+}
+.kanz-atmosphere-particle {
+  animation: kanz-atmosphere-drift var(--kanz-particle-duration, 9s) ease-in-out infinite;
+  animation-delay: var(--kanz-particle-delay, 0s);
+}
+
+/* Dashboard "operational" status dots (DashboardHeader, SecurityStatusPanel)
+ * — a slow, restrained pulse, never a blink/flash. */
+@keyframes kanz-status-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent); }
+  50% { opacity: 0.75; box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 0%, transparent); }
+}
+.kanz-status-pulse {
+  animation: kanz-status-pulse 2.6s ease-in-out infinite;
+  color: inherit;
+}
+
+/* prefers-reduced-motion: every animation above collapses to its resting
+ * frame instantly — the hand-picked SVG attribute values in KanzLogo.tsx
+ * (a full circle, a 45°-rotated diamond at half opacity, both rings at
+ * their base geometry) already read as a complete, premium mark on their
+ * own, so this is a genuinely static *version of the same identity*, not
+ * a degraded one. This is the one place the guarantee is enforced, so no
+ * individual component needs its own reduced-motion branch. */
+@media (prefers-reduced-motion: reduce) {
+  .kanz-core-a,
+  .kanz-core-b,
+  .kanz-ring-a,
+  .kanz-ring-b,
+  .kanz-particle-dot-1,
+  .kanz-particle-dot-2,
+  .kanz-particle-dot-3,
+  .kanz-splash-wordmark,
+  .kanz-splash-tagline,
+  .kanz-lease-dot,
+  .kanz-node,
+  .kanz-atmosphere-particle,
+  .kanz-status-pulse {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
+  /* The hover icon-shift is also motion, not just a color change — freeze
+   * it too so a reduced-motion user gets a purely static hover cue. */
+  [data-slot="sidebar-menu-button"]:hover svg {
+    transform: none !important;
+  }
+  /* Atmosphere particles' resting (pre-animation) state is invisible
+   * (opacity: 0, see kanz-atmosphere-drift's 0%) — frozen at that frame
+   * they'd simply vanish, which reads as broken, not "reduced motion." */
+  .kanz-atmosphere-particle {
+    opacity: var(--kanz-particle-opacity, 0.35) !important;
+  }
+  /* The traveling "signal" dash on a hovered/focused line is continuous
+   * motion and gets disabled — the line still brightens on hover/focus
+   * (a plain property change via the :has() rules above, not an
+   * `animation`), so that feedback is retained exactly as the brief asks. */
+  .kanz-line {
+    animation: none !important;
+  }
+}

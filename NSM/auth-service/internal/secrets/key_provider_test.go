@@ -1,0 +1,151 @@
+package secrets
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"testing"
+)
+
+// newTestKeyBase64 generates a fresh, random 256-bit key for test use —
+// never a literal string, never reused across the security review's
+// "generated test keys, not real secrets" requirement.
+func newTestKeyBase64(t *testing.T) string {
+	t.Helper()
+	key := make([]byte, devKeyLength)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(key)
+}
+
+// --- Construction ---
+
+func TestNewDevKeyProvider_Succeeds(t *testing.T) {
+	p, err := NewDevKeyProvider("test-key-1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v, want nil", err)
+	}
+	if p == nil {
+		t.Fatal("NewDevKeyProvider() returned a nil provider with a nil error")
+	}
+}
+
+func TestNewDevKeyProvider_MissingKeyID(t *testing.T) {
+	_, err := NewDevKeyProvider("", newTestKeyBase64(t))
+	if err == nil {
+		t.Fatal("NewDevKeyProvider() with an empty key ID, error = nil, want an error")
+	}
+}
+
+// Missing key fails safely (test requirement #8).
+func TestNewDevKeyProvider_MissingKeyMaterial(t *testing.T) {
+	_, err := NewDevKeyProvider("test-key-1", "")
+	if !errors.Is(err, ErrKeyProviderMisconfigured) {
+		t.Errorf("NewDevKeyProvider() with no key material, error = %v, want ErrKeyProviderMisconfigured", err)
+	}
+}
+
+func TestNewDevKeyProvider_InvalidBase64(t *testing.T) {
+	_, err := NewDevKeyProvider("test-key-1", "not-valid-base64!!!")
+	if !errors.Is(err, ErrKeyProviderMisconfigured) {
+		t.Errorf("NewDevKeyProvider() with invalid base64, error = %v, want ErrKeyProviderMisconfigured", err)
+	}
+}
+
+// Invalid key length fails safely (test requirement #9).
+func TestNewDevKeyProvider_WrongKeyLength(t *testing.T) {
+	tests := []struct {
+		name      string
+		byteCount int
+	}{
+		{"too short (16 bytes / AES-128 length)", 16},
+		{"too long (64 bytes)", 64},
+		{"empty", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := make([]byte, tt.byteCount)
+			if _, err := rand.Read(key); err != nil {
+				t.Fatalf("rand.Read: %v", err)
+			}
+			_, err := NewDevKeyProvider("test-key-1", base64.StdEncoding.EncodeToString(key))
+			if !errors.Is(err, ErrKeyProviderMisconfigured) {
+				t.Errorf("NewDevKeyProvider() with a %d-byte key, error = %v, want ErrKeyProviderMisconfigured", tt.byteCount, err)
+			}
+		})
+	}
+}
+
+// --- Key retrieval ---
+
+func TestDevKeyProvider_GetCurrentKey(t *testing.T) {
+	keyB64 := newTestKeyBase64(t)
+	p, err := NewDevKeyProvider("test-key-1", keyB64)
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	key, keyID, err := p.GetCurrentKey(context.Background())
+	if err != nil {
+		t.Fatalf("GetCurrentKey() error = %v", err)
+	}
+	if keyID != "test-key-1" {
+		t.Errorf("GetCurrentKey() keyID = %q, want %q", keyID, "test-key-1")
+	}
+	wantKey, _ := base64.StdEncoding.DecodeString(keyB64)
+	if string(key) != string(wantKey) {
+		t.Error("GetCurrentKey() returned different key bytes than were configured")
+	}
+}
+
+// Key identifiers are handled correctly (test requirement #14).
+func TestDevKeyProvider_GetKey(t *testing.T) {
+	p, err := NewDevKeyProvider("test-key-1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	if _, err := p.GetKey(context.Background(), "test-key-1"); err != nil {
+		t.Errorf("GetKey() with the configured key ID, error = %v, want nil", err)
+	}
+
+	_, err = p.GetKey(context.Background(), "some-other-key-id")
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("GetKey() with an unknown key ID, error = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// Each call must return an independent copy: mutating what one call
+// returned must never corrupt the provider's own retained key material or
+// leak into a later, unrelated call's result.
+func TestDevKeyProvider_ReturnsIndependentCopies(t *testing.T) {
+	p, err := NewDevKeyProvider("test-key-1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	first, _, err := p.GetCurrentKey(context.Background())
+	if err != nil {
+		t.Fatalf("GetCurrentKey() error = %v", err)
+	}
+	for i := range first {
+		first[i] = 0xFF
+	}
+
+	second, _, err := p.GetCurrentKey(context.Background())
+	if err != nil {
+		t.Fatalf("GetCurrentKey() error = %v", err)
+	}
+	allZero := true
+	for _, b := range second {
+		if b != 0xFF {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Fatal("mutating one GetCurrentKey() result corrupted a later call's result — the provider is not returning independent copies")
+	}
+}

@@ -1,0 +1,77 @@
+package repository
+
+import (
+	"context"
+	"time"
+
+	"github.com/acme/auth-service/internal/entity"
+)
+
+// LoginHistoryRepository is append-only: there is deliberately no Update or
+// Delete method — see auth-service-database-schema.md §"login_history".
+type LoginHistoryRepository interface {
+	Record(ctx context.Context, e *entity.LoginHistoryEntry) error
+	List(ctx context.Context, organizationID string, f LoginHistoryFilter) ([]*entity.LoginHistoryEntry, error)
+}
+
+type LoginHistoryFilter struct {
+	UserID         *string
+	Status         *entity.LoginStatus
+	IPAddress      *string
+	OccurredAfter  *string
+	OccurredBefore *string
+	Cursor         *string
+	Limit          int
+}
+
+// AuditLogRepository is append-only for the same reason, plus a hash-chain
+// invariant a mutation would break outright: Append must compute
+// RecordHash from the previous row's hash, so there is no "Update" to offer.
+type AuditLogRepository interface {
+	Append(ctx context.Context, e *entity.AuditLogEntry) error
+	GetByID(ctx context.Context, id string) (*entity.AuditLogEntry, error)
+	List(ctx context.Context, organizationID string, f AuditLogFilter) ([]*entity.AuditLogEntry, error)
+	// CountByResult returns, in one query, how many rows f matches for
+	// each entity.AuditResult value — f.Cursor/f.Limit are ignored (a
+	// count reflects the whole filtered set, never one page of it). Used
+	// by the Audit Explorer's summary cards (Total/Successful/Failed/
+	// Denied); never by anything that also needs the rows themselves —
+	// List is that call, kept as a separate query on purpose rather than
+	// folded into one response, since a cursor-paginated caller almost
+	// never wants a fresh full-set count on every page fetch.
+	CountByResult(ctx context.Context, organizationID string, f AuditLogFilter) (map[entity.AuditResult]int, error)
+	// LatestHash returns the RecordHash of the most recent row for this
+	// organization, so Append can chain the next one — nil/"" if this is
+	// the first entry.
+	LatestHash(ctx context.Context, organizationID string) (string, error)
+}
+
+// AuditLogFilter is List's argument. OccurredAfter/OccurredBefore are
+// inclusive-exclusive bounds on occurred_at (After <= occurred_at < Before,
+// see postgresAuditLogRepository.List's own comment on the exact
+// comparison); both nil means no time bound at all. Cursor is an opaque
+// value from a previous response's PageMeta.NextCursor (see
+// util.EncodeCursor/DecodeCursor) — set it to continue from where the
+// last page left off, never constructed by a caller directly. Limit <= 0
+// or > 100 is clamped to a safe default by the implementation, never
+// treated as "no limit": there is no code path through this filter that
+// can request unbounded audit-log retrieval.
+type AuditLogFilter struct {
+	ActorType      *entity.AuditActorType
+	ActorID        *string
+	Action         *string
+	ResourceType   *string
+	// ResourceID matches a row's own opaque resource_id (a secret/lease's
+	// UUID, say) OR the human-readable path recorded in that row's own
+	// Metadata (SecretService writes "path", LeaseService writes
+	// "resource_path" — see postgres.whereClauseForFilter's own doc
+	// comment) — so a caller searching by the path they actually know
+	// finds the row, not just a caller who already has the opaque ID.
+	ResourceID *string
+	Result         *entity.AuditResult
+	RequestID      *string
+	OccurredAfter  *time.Time
+	OccurredBefore *time.Time
+	Cursor         *string
+	Limit          int
+}

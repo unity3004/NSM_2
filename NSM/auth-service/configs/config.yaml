@@ -1,0 +1,89 @@
+# Non-secret operational defaults, safe to commit — this file is read by
+# internal/config.Load with the LOWEST precedence: any environment
+# variable overrides the same key. It exists so a contributor can `go run
+# ./cmd/server` after only setting AUTH_JWT_SIGNING_KEY and
+# AUTH_DATABASE_PASSWORD, without retyping every timeout by hand.
+#
+# What belongs here: timeouts, pool sizes, log format — values that are
+# the same in every environment until someone deliberately tunes them.
+# What must never go here: database.password, jwt.signing_key, or anything
+# else internal/config.Config.Validate treats as a secret. Those have NO
+# default in code and NO entry in this file on purpose — they can only
+# come from an environment variable, which is what keeps them out of git
+# history. See ../README.md, "Why configuration is not hardcoded."
+
+environment: development
+
+server:
+  http_addr: ":8080"
+  read_timeout: 10s
+  write_timeout: 15s
+  shutdown_timeout: 15s
+  allowed_origins: []
+
+database:
+  host: localhost
+  port: 5432
+  user: authsvc
+  name: authdb
+  sslmode: disable
+  max_open_conns: 25
+  max_idle_conns: 25
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 2m
+
+jwt:
+  access_token_ttl: 15m
+  refresh_token_ttl: 720h
+
+rate_limit:
+  login_per_minute: 5
+
+# postgres_provisioner (Sprint 5 Task 3) is disabled by default — see
+# internal/config.PostgresProvisionerConfig's own doc comment. Uncomment
+# and adapt to enable the "postgres" dynamic-secret lease type. host/
+# port/name here should point at the SAME server as the database section
+# above only in a single-instance dev setup; a real deployment's
+# provisioner connection targets whatever server owns the databases named
+# by its own role_templates, using a dedicated `vault-provisioner`
+# identity — never the `database.*` credentials above. See
+# leasing/postgres.Provider's own doc comment for exactly which
+# privileges that identity needs (CREATEROLE, plus CONNECT/the relevant
+# GRANT-able privileges WITH GRANT OPTION on each templated database).
+#
+# postgres_provisioner:
+#   enabled: true
+#   host: localhost
+#   port: 5432
+#   user: vault_provisioner
+#   name: authdb
+#   sslmode: disable
+#   role_templates:
+#     - name: payment-readonly
+#       database: payment_db
+#       schemas: [public]
+#       privileges: [SELECT]
+
+# role_templates is safe to commit unconditionally — see
+# PostgresRoleTemplate's own doc comment: it names no credential, only
+# which (database, schema, privilege) combinations a caller may select by
+# name once the feature above is actually enabled. It sits here, uncommented,
+# specifically so enabling the feature is ever only "set
+# AUTH_POSTGRES_PROVISIONER_ENABLED=true plus the connection env vars" —
+# never "also go edit this file" — the identical split every other
+# optional subsystem in this file already keeps between committed
+# operational shape and environment-supplied enablement/secrets. Targets a
+# dedicated vault_demo schema (see docker/docker-compose.yml's own
+# provisioning step), never an application table like users or secrets,
+# so a demo dynamic credential can never read anything this service
+# itself depends on.
+postgres_provisioner:
+  role_templates:
+    - name: demo-readonly
+      database: authdb
+      schemas: [vault_demo]
+      privileges: [SELECT]
+
+log:
+  level: info
+  format: json
