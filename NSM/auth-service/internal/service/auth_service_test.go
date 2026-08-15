@@ -248,6 +248,32 @@ func TestLogin_MalformedInput_MissingPassword(t *testing.T) {
 // silently turned into entity.ErrInvalidCredentials — while
 // writeServiceError's default branch is what keeps the external response
 // equally generic either way (see internal/handler/http/response.go).
+// TestLogin_MissingOrganizationID reproduces a caller that omits the
+// tenant header entirely (organizationIDFromRequest's own "" zero value) —
+// before this test's own fix, that empty string reached
+// users.organization_id (a UUID-typed Postgres column) and surfaced as a
+// raw, unmapped 500 rather than the same generic invalid-credentials
+// response every other identification failure produces. Asserts no
+// login_history/audit row is written either, matching the rate-limit
+// rejection just above this check's own call site: neither ever attempted
+// a real, evaluated lookup.
+func TestLogin_MissingOrganizationID(t *testing.T) {
+	svc, users, _, loginHistory, audit := newTestAuthService(t)
+	seedUser(t, users, "marcus.webb@acme.com", "Tr0ub4dor&3xample!")
+
+	_, err := svc.Login(t.Context(), "", "marcus.webb@acme.com", "Tr0ub4dor&3xample!", LoginMeta{})
+	if !errors.Is(err, entity.ErrInvalidCredentials) {
+		t.Errorf("Login() with organizationID = \"\", error = %v, want entity.ErrInvalidCredentials", err)
+	}
+
+	if len(loginHistory.Entries) != 0 {
+		t.Errorf("login_history has %d entries, want 0 — no evaluated attempt happened", len(loginHistory.Entries))
+	}
+	if len(audit.Entries) != 0 {
+		t.Errorf("audit_logs has %d entries, want 0 — no evaluated attempt happened", len(audit.Entries))
+	}
+}
+
 func TestLogin_DatabaseFailure(t *testing.T) {
 	svc, users, _, loginHistory, _ := newTestAuthService(t)
 	dbErr := errors.New("simulated database connection error: dial tcp: connect: connection refused")

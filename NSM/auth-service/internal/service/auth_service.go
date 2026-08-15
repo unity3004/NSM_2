@@ -139,6 +139,21 @@ func (s *AuthService) Login(ctx context.Context, organizationID string, email, p
 		return nil, RateLimitedError{RetryAfter: s.deps.RateLimitRetryAfter}
 	}
 
+	// A missing tenant header (organizationID == "") means this was never
+	// a real, evaluated login attempt against a specific organization's
+	// users — the same reasoning the rate-limit rejection just above
+	// already follows for not writing a login_history row: no user lookup
+	// could even be attempted. Rejecting here, before organizationID ever
+	// reaches users.organization_id (a UUID-typed column), turns what
+	// would otherwise be a raw Postgres "invalid input syntax for type
+	// uuid" 500 into the same generic invalid-credentials response every
+	// other identification failure below already returns — never a
+	// distinct signal an unauthenticated caller could use to fingerprint
+	// why the request failed.
+	if organizationID == "" {
+		return nil, entity.ErrInvalidCredentials
+	}
+
 	now := time.Now()
 	entry := &entity.LoginHistoryEntry{
 		OrganizationID:      &organizationID,
