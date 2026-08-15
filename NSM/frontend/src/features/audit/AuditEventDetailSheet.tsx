@@ -1,4 +1,6 @@
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
+import { Copy, Check } from "lucide-react"
+import { toast } from "sonner"
 import {
   Sheet,
   SheetContent,
@@ -6,20 +8,18 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
-import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
-import type { AuditLogResponse, AuditResult } from "@/types/audit"
-
-function resultBadgeVariant(result: AuditResult): "outline" | "destructive" | "secondary" {
-  switch (result) {
-    case "success":
-      return "outline"
-    case "failure":
-      return "destructive"
-    case "denied":
-      return "secondary"
-  }
-}
+import {
+  actorLabel,
+  actorTypeLabel,
+  resourceTypeAndPath,
+  RESULT_META,
+} from "@/features/dashboard/auditDisplay"
+import { cn } from "@/lib/utils"
+import type { AuditLogResponse } from "@/types/audit"
+import type { UserResponse } from "@/types/user"
+import type { ServiceAccountResponse } from "@/types/serviceAccount"
 
 function Field({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
@@ -30,80 +30,147 @@ function Field({ label, value, mono }: { label: string; value: ReactNode; mono?:
   )
 }
 
-// event is the exact AuditLogResponse row the table already fetched via
+function Divider() {
+  return <div className="border-t border-border" />
+}
+
+// event is the exact AuditLogResponse row the list already fetched via
 // GET /v1/audit-logs — this component makes no request of its own (no
-// GET /v1/audit-logs/{id} endpoint exists, and none is needed: every
+// separate GET /v1/audit-logs/{id} call for a row already in hand) — every
 // field the objective's own event-detail list asks for — ID, timestamp,
 // actor, actor type, action, resource, result, request ID, source IP,
-// user agent, error code, metadata — is already present in the list
-// response). This is deliberate: an N+1 fetch-per-row-click would be the
-// exact anti-pattern the objective's own performance section rules out.
+// metadata — is already present in the list response. This is deliberate:
+// an N+1 fetch-per-row-click would be the exact anti-pattern the
+// objective's own performance section rules out.
 //
-// "User agent" and "error code" are not distinct columns on
-// entity.AuditLogEntry — this codebase's convention (see e.g.
-// AuthService.recordLoginAudit's own failure_reason field) is to carry
-// that kind of contextual detail inside Metadata instead of adding a
-// database column per event-specific field, so they render here as
-// metadata keys ("user_agent", "error_code") when a given event actually
-// set them, never as an empty placeholder for events that don't.
+// users/serviceAccounts are the same already-loaded lists AuditLogsPage's
+// Identity filter and every row already use (actorLabel) — passed down
+// rather than re-fetched, so opening an event costs zero extra requests.
 export function AuditEventDetailSheet({
   event,
+  users,
+  serviceAccounts,
   onOpenChange,
 }: {
   event: AuditLogResponse | null
+  users?: UserResponse[]
+  serviceAccounts?: ServiceAccountResponse[]
   onOpenChange: (open: boolean) => void
 }) {
+  const [copied, setCopied] = useState(false)
   const metadataEntries = Object.entries(event?.metadata ?? {})
+  const result = event ? RESULT_META[event.result] : null
+  const resource = event ? resourceTypeAndPath(event) : null
+
+  async function copyRequestId() {
+    if (!event?.request_id) return
+    await navigator.clipboard.writeText(event.request_id)
+    setCopied(true)
+    toast.success("Request ID copied")
+    setTimeout(() => setCopied(false), 2000)
+  }
 
   return (
-    <Sheet open={event !== null} onOpenChange={onOpenChange}>
+    <Sheet
+      open={event !== null}
+      onOpenChange={(open) => {
+        setCopied(false)
+        onOpenChange(open)
+      }}
+    >
       <SheetContent className="w-full sm:max-w-lg">
         <SheetHeader>
-          <div className="flex items-center gap-2">
-            <SheetTitle className="font-mono text-base">{event?.action}</SheetTitle>
-            {event && (
-              <Badge variant={resultBadgeVariant(event.result)} className="text-xs">
-                {event.result}
-              </Badge>
-            )}
-          </div>
-          <SheetDescription>
-            {event ? new Date(event.occurred_at).toLocaleString() : ""}
-          </SheetDescription>
+          <SheetTitle className="font-mono text-base">{event?.action}</SheetTitle>
+          {event && result && (
+            <span className={cn("flex w-fit items-center gap-1 text-xs font-semibold tracking-wide", result.className)}>
+              <result.icon className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
+              {result.label}
+            </span>
+          )}
+          <SheetDescription className="sr-only">Audit event details</SheetDescription>
         </SheetHeader>
 
         {event && (
           <div className="flex flex-col gap-4 overflow-y-auto px-4 pb-4">
-            <Field label="Event ID" value={event.id} mono />
-            <Field label="Actor" value={event.actor_id ?? "system"} mono />
-            <Field label="Actor type" value={event.actor_type} />
             <Field
-              label="Resource"
+              label="Identity"
               value={
-                event.resource_type
-                  ? `${event.resource_type}${event.resource_id ? `: ${event.resource_id}` : ""}`
-                  : "—"
+                <div className="flex items-center gap-2">
+                  <span>{actorLabel(event, users, serviceAccounts)}</span>
+                  <span className="rounded border border-border px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide text-muted-foreground uppercase">
+                    {actorTypeLabel(event.actor_type)}
+                  </span>
+                </div>
               }
-              mono
             />
-            <Field label="Request ID" value={event.request_id ?? "—"} mono />
+
+            <Divider />
+
+            <Field label="Resource" value={resource ?? "—"} mono={resource !== null} />
+
+            <Divider />
+
+            <Field
+              label="Timestamp"
+              value={
+                <div className="flex flex-col">
+                  <span>{new Date(event.occurred_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}</span>
+                  <span className="text-muted-foreground">{new Date(event.occurred_at).toLocaleTimeString()}</span>
+                </div>
+              }
+            />
+
+            <Divider />
+
+            <Field
+              label="Request ID"
+              value={
+                event.request_id ? (
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate">{event.request_id}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 px-2"
+                      onClick={copyRequestId}
+                    >
+                      {copied ? <Check className="size-3.5 text-kanz-success" /> : <Copy className="size-3.5" />}
+                      {copied ? "Copied" : "Copy"}
+                    </Button>
+                  </div>
+                ) : (
+                  "—"
+                )
+              }
+              mono={Boolean(event.request_id)}
+            />
+
+            <Divider />
+
             <Field label="Source IP" value={event.ip_address ?? "—"} mono />
 
             {metadataEntries.length > 0 && (
-              <div className="flex flex-col gap-1">
-                <Label className="text-xs text-muted-foreground">Metadata</Label>
-                <pre className="overflow-x-auto rounded-md border bg-muted px-2 py-1.5 font-mono text-xs">
-                  {JSON.stringify(event.metadata, null, 2)}
-                </pre>
-              </div>
+              <>
+                <Divider />
+                <div className="flex flex-col gap-1">
+                  <Label className="text-xs text-muted-foreground">Event Metadata</Label>
+                  <details className="group">
+                    <summary className="cursor-pointer text-sm text-kanz-primary transition-colors hover:text-kanz-primary-glow">
+                      <span className="group-open:hidden">Expand</span>
+                      <span className="hidden group-open:inline">Collapse</span>
+                    </summary>
+                    <pre className="mt-2 overflow-x-auto rounded-md border border-border bg-muted px-2 py-1.5 font-mono text-xs">
+                      {JSON.stringify(event.metadata, null, 2)}
+                    </pre>
+                  </details>
+                </div>
+              </>
             )}
 
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Record hash</Label>
-              <div className="font-mono text-xs break-all text-muted-foreground">
-                {event.record_hash}
-              </div>
-            </div>
+            <Divider />
+
+            <Field label="Record hash" value={event.record_hash} mono />
           </div>
         )}
       </SheetContent>

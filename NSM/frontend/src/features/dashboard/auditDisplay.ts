@@ -1,4 +1,17 @@
-import type { AuditLogResponse } from "@/types/audit"
+import type { LucideIcon } from "lucide-react"
+import {
+  KeyRound,
+  Zap,
+  LogIn,
+  ShieldCheck,
+  Lock,
+  Bot,
+  Radar,
+  CheckCircle2,
+  XCircle,
+  ShieldOff,
+} from "lucide-react"
+import type { AuditLogResponse, AuditResult } from "@/types/audit"
 import type { UserResponse } from "@/types/user"
 import type { ServiceAccountResponse } from "@/types/serviceAccount"
 
@@ -64,4 +77,64 @@ export function resourceLabel(event: AuditLogResponse): string | null {
   if (typeof path === "string" && path.length > 0) return path
   if (event.resource_type) return RESOURCE_TYPE_LABELS[event.resource_type] ?? event.resource_type
   return null
+}
+
+/**
+ * "secret / production/database" — the resource's real type alongside its
+ * real path, for contexts (the Audit Explorer's list/detail views) that
+ * want both rather than resourceLabel's single best-available string. Only
+ * combines the two when both are genuinely present; a bare login or
+ * similar resourceless event still returns null rather than an empty
+ * "type / " fragment.
+ */
+export function resourceTypeAndPath(event: AuditLogResponse): string | null {
+  const metadata = event.metadata
+  const path = metadata?.path ?? metadata?.resource_path
+  const hasPath = typeof path === "string" && path.length > 0
+  if (event.resource_type && hasPath) return `${event.resource_type} / ${path}`
+  if (hasPath) return path as string
+  if (event.resource_type) return RESOURCE_TYPE_LABELS[event.resource_type] ?? event.resource_type
+  return null
+}
+
+/** "Human" / "Machine" / "System" / "API key" — a friendly label for the
+ * real actor_type enum, distinct from actorLabel's resolved name, for
+ * contexts (the Audit Explorer's identity badge) that want to show both
+ * side by side. */
+const ACTOR_TYPE_LABELS: Record<AuditLogResponse["actor_type"], string> = {
+  user: "Human",
+  service_account: "Machine",
+  api_key: "API key",
+  system: "System",
+}
+
+export function actorTypeLabel(actorType: AuditLogResponse["actor_type"]): string {
+  return ACTOR_TYPE_LABELS[actorType]
+}
+
+/** Icon for a real action string, grouped by its dot-prefix category — the
+ * same real event-name convention every backend audit write already
+ * follows (e.g. "secret.read", "lease.revoked"), not a per-action lookup
+ * table that would need updating every time a new action name is added
+ * server-side. Falls back to a generic radar icon for anything
+ * unrecognized, so a future action type still renders something rather
+ * than nothing. */
+export function iconForAction(action: string): LucideIcon {
+  if (action.startsWith("secret.")) return KeyRound
+  if (action.startsWith("lease.")) return Zap
+  if (action.startsWith("policy.") || action.startsWith("secret_policy.")) return ShieldCheck
+  if (action.startsWith("key.") || action.startsWith("encryption.")) return Lock
+  if (action.startsWith("service_account.")) return Bot
+  if (action.startsWith("user.") || action.startsWith("auth.")) return LogIn
+  return Radar
+}
+
+/** "Denied" (an authorization refusal) is visually distinct from "Failure"
+ * (an operation that errored outright) — collapsing both into the same red
+ * would be exactly the color-only signal this product's own accessibility
+ * requirements rule out. */
+export const RESULT_META: Record<AuditResult, { icon: LucideIcon; label: string; className: string }> = {
+  success: { icon: CheckCircle2, label: "SUCCESS", className: "text-kanz-success" },
+  denied: { icon: ShieldOff, label: "DENIED", className: "text-kanz-warning" },
+  failure: { icon: XCircle, label: "FAILED", className: "text-kanz-danger" },
 }

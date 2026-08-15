@@ -1,50 +1,15 @@
-import type { LucideIcon } from "lucide-react"
 import { Link } from "react-router-dom"
-import {
-  History,
-  KeyRound,
-  Zap,
-  LogIn,
-  ShieldCheck,
-  Lock,
-  Bot,
-  Radar,
-  CheckCircle2,
-  XCircle,
-  ShieldOff,
-  RefreshCw,
-  ArrowRight,
-} from "lucide-react"
+import { History, RefreshCw, ArrowRight } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useAuditLogs } from "@/features/audit/useAuditLogs"
 import { useUsers } from "@/features/users/useUsers"
 import { useServiceAccounts } from "@/features/serviceAccounts/useServiceAccounts"
-import { actorLabel, resourceLabel } from "@/features/dashboard/auditDisplay"
+import { actorLabel, resourceLabel, iconForAction, RESULT_META } from "@/features/dashboard/auditDisplay"
 import { formatRelativeTime } from "@/lib/utils"
 import { cn } from "@/lib/utils"
-import type { AuditLogResponse, AuditResult } from "@/types/audit"
-
-function iconForAction(action: string): LucideIcon {
-  if (action.startsWith("secret.")) return KeyRound
-  if (action.startsWith("lease.")) return Zap
-  if (action.startsWith("policy.") || action.startsWith("secret_policy.")) return ShieldCheck
-  if (action.startsWith("key.") || action.startsWith("encryption.")) return Lock
-  if (action.startsWith("service_account.")) return Bot
-  if (action.startsWith("user.") || action.startsWith("auth.")) return LogIn
-  return Radar
-}
-
-const RESULT_META: Record<AuditResult, { icon: LucideIcon; label: string; className: string }> = {
-  success: { icon: CheckCircle2, label: "SUCCESS", className: "text-kanz-success" },
-  // "Denied" (an authorization refusal) is visually distinct from
-  // "Failure" (an operation that errored outright) — both would
-  // otherwise collapse into the same red, which is exactly the
-  // color-only signal the brief says not to rely on.
-  denied: { icon: ShieldOff, label: "DENIED", className: "text-kanz-warning" },
-  failure: { icon: XCircle, label: "FAILED", className: "text-kanz-danger" },
-}
+import type { AuditLogResponse } from "@/types/audit"
 
 /**
  * "Recent Security Activity" — reuses the identical GET /v1/audit-logs
