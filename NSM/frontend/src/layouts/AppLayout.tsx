@@ -277,8 +277,16 @@ export function AppLayout() {
           <span className="text-sm font-medium">{title}</span>
         </header>
 
-        <main className="flex flex-1 flex-col gap-4 p-4 md:p-6">
-          <Outlet />
+        {/* mx-auto max-w-[1600px] here — not per-page — is what keeps every
+            route from stretching edge-to-edge on an ultrawide display
+            (KANZ Phase 9's own "do not simply stretch content to 100%
+            viewport width" requirement), applied once so no page has to
+            remember to opt in. Most pages don't need it below ~1600px;
+            it only ever engages on genuinely wide viewports. */}
+        <main className="flex flex-1 flex-col p-4 md:p-6">
+          <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col">
+            <Outlet />
+          </div>
         </main>
       </SidebarInset>
     </SidebarProvider>

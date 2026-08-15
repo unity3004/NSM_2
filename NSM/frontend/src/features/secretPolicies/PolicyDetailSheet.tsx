@@ -95,7 +95,7 @@ export function PolicyDetailSheet({
 
   return (
     <Sheet open={policyId !== null} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-md">
+      <SheetContent className="w-full sm:max-w-lg">
         <SheetHeader>
           <SheetTitle>{detail?.name}</SheetTitle>
           <SheetDescription>{detail?.description ?? "No description."}</SheetDescription>

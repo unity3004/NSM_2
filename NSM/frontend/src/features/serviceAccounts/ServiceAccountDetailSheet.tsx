@@ -26,6 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { StatusBadge } from "@/components/StatusBadge"
 import { useServiceAccount, useServiceAccountCredentials } from "@/features/serviceAccounts/useServiceAccount"
 import {
   useAssignServiceAccountRole,
@@ -36,6 +37,7 @@ import {
   useUpdateServiceAccount,
 } from "@/features/serviceAccounts/useServiceAccountMutations"
 import { CreateCredentialDialog } from "@/features/serviceAccounts/CreateCredentialDialog"
+import { SERVICE_ACCOUNT_STATUS_META, API_KEY_STATUS_META } from "@/features/serviceAccounts/serviceAccountDisplay"
 import { useRoles } from "@/features/roles/useRoles"
 import { usePermission } from "@/features/auth/usePermission"
 import { friendlyErrorMessage } from "@/lib/errorMessage"
@@ -174,9 +176,11 @@ export function ServiceAccountDetailSheet({
           <div className="flex items-center gap-2">
             <SheetTitle>{detail?.name}</SheetTitle>
             {detail && (
-              <Badge variant={detail.status === "active" ? "outline" : "destructive"} className="text-xs">
-                {detail.status}
-              </Badge>
+              <StatusBadge
+                icon={SERVICE_ACCOUNT_STATUS_META[detail.status].icon}
+                label={SERVICE_ACCOUNT_STATUS_META[detail.status].label}
+                className={SERVICE_ACCOUNT_STATUS_META[detail.status].className}
+              />
             )}
           </div>
           <SheetDescription>{detail?.description ?? "No description."}</SheetDescription>
@@ -307,9 +311,11 @@ export function ServiceAccountDetailSheet({
                   <li key={key.id} className="flex flex-col gap-1 rounded-lg border p-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium">{key.name}</span>
-                      <Badge variant={key.status === "active" ? "outline" : "destructive"} className="text-xs">
-                        {key.status}
-                      </Badge>
+                      <StatusBadge
+                        icon={API_KEY_STATUS_META[key.status].icon}
+                        label={API_KEY_STATUS_META[key.status].label}
+                        className={API_KEY_STATUS_META[key.status].className}
+                      />
                     </div>
                     <code className="text-xs text-muted-foreground">{key.key_prefix}…</code>
                     <div className="flex items-center justify-between text-xs text-muted-foreground">

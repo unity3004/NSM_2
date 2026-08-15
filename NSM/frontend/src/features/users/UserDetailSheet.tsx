@@ -20,10 +20,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { StatusBadge } from "@/components/StatusBadge"
 import { useUserDetail } from "@/features/users/useUserDetail"
 import { useSetUserStatus } from "@/features/users/useSetUserStatus"
 import { useAssignRole, useRemoveRole } from "@/features/users/useRoleAssignment"
 import { useRoles } from "@/features/roles/useRoles"
+import { USER_STATUS_META } from "@/features/users/userDisplay"
 import { X } from "lucide-react"
 
 export function UserDetailSheet({
@@ -46,7 +48,7 @@ export function UserDetailSheet({
 
   return (
     <Sheet open={userId !== null} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-md">
+      <SheetContent className="w-full sm:max-w-lg">
         <SheetHeader>
           <SheetTitle>{user?.username ?? "User details"}</SheetTitle>
           <SheetDescription>{user?.email}</SheetDescription>
@@ -65,9 +67,11 @@ export function UserDetailSheet({
             <>
               <section className="flex flex-col gap-2">
                 <Row label="Status">
-                  <Badge variant={user.status === "active" ? "default" : "outline"} className="capitalize">
-                    {user.status.replace("_", " ")}
-                  </Badge>
+                  <StatusBadge
+                    icon={USER_STATUS_META[user.status].icon}
+                    label={USER_STATUS_META[user.status].label}
+                    className={USER_STATUS_META[user.status].className}
+                  />
                 </Row>
                 <Row label="Created">
                   <span className="text-xs">{new Date(user.created_at).toLocaleString()}</span>

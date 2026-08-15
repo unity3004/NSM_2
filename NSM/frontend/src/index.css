@@ -220,6 +220,13 @@
   transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
 }
 [data-slot="sidebar-menu-button"] svg {
+  /* Matches the 1.75 stroke weight every content icon in the app sets
+     explicitly (strokeWidth={1.75}) — lucide's own default is 2, which
+     read slightly heavier here than the rest of KANZ. The CSS property
+     overrides each icon's own stroke-width="2" SVG attribute (CSS wins
+     over presentation attributes), so this is a single, central fix
+     rather than touching every nav icon import. */
+  stroke-width: 1.75;
   transition: transform 180ms ease, color 180ms ease;
 }
 /* Hover: background is already handled by the primitive's own

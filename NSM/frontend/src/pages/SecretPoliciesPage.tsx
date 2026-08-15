@@ -1,5 +1,7 @@
 import { useState } from "react"
+import { ShieldCheck, AlertTriangle, RefreshCw } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Table,
@@ -13,6 +15,7 @@ import { useSecretPolicies } from "@/features/secretPolicies/useSecretPolicies"
 import { CreatePolicyDialog } from "@/features/secretPolicies/CreatePolicyDialog"
 import { PolicyDetailSheet } from "@/features/secretPolicies/PolicyDetailSheet"
 import { usePermission } from "@/features/auth/usePermission"
+import { cn } from "@/lib/utils"
 
 // REAL API DATA: every row comes from GET /v1/secret-policies
 // (secret_policies:read-gated) — these are path-scoped authorization
@@ -22,7 +25,7 @@ import { usePermission } from "@/features/auth/usePermission"
 // first, and a policy assigned to that role then decides which secret
 // *paths* it may reach.
 export function SecretPoliciesPage() {
-  const { data, isLoading, isError } = useSecretPolicies()
+  const { data, isLoading, isError, refetch, isRefetching } = useSecretPolicies()
   const [selectedPolicyId, setSelectedPolicyId] = useState<string | null>(null)
   const canCreate = usePermission("secret_policies:create")
 
@@ -31,20 +34,36 @@ export function SecretPoliciesPage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Secret policies</h1>
-          <p className="text-sm text-muted-foreground">
-            Policies restrict which secret paths a role's members may reach. A role must still hold
-            the underlying secrets:* permission — a policy narrows that grant, it never widens it.
-          </p>
+        <div className="flex items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-kanz-surface-elevated text-kanz-primary">
+            <ShieldCheck className="size-5" strokeWidth={1.75} aria-hidden="true" />
+          </span>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Secret policies</h1>
+            <p className="text-sm text-muted-foreground">
+              Policies restrict which secret paths a role's members may reach. A role must still
+              hold the underlying secrets:* permission — a policy narrows that grant, it never
+              widens it.
+            </p>
+          </div>
         </div>
         {canCreate && <CreatePolicyDialog />}
       </div>
 
-      {isError && (
-        <p className="text-sm text-muted-foreground">
-          You don't have permission to view secret policies, or something went wrong.
-        </p>
+      {!isLoading && isError && (
+        <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border py-12 text-center">
+          <AlertTriangle className="size-5 text-muted-foreground" strokeWidth={1.5} aria-hidden="true" />
+          <div>
+            <p className="text-sm font-medium text-foreground">Unable to load secret policies</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              You may not have permission to view secret policies, or something went wrong.
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isRefetching}>
+            <RefreshCw className={cn("size-3.5", isRefetching && "animate-spin")} />
+            {isRefetching ? "Retrying…" : "Retry"}
+          </Button>
+        </div>
       )}
 
       {isLoading && (
@@ -56,7 +75,18 @@ export function SecretPoliciesPage() {
       )}
 
       {!isLoading && !isError && policies.length === 0 && (
-        <p className="text-sm text-muted-foreground">No secret policies yet.</p>
+        <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border py-16 text-center">
+          <span className="flex size-12 items-center justify-center rounded-full bg-kanz-surface-elevated text-kanz-primary">
+            <ShieldCheck className="size-5" strokeWidth={1.75} aria-hidden="true" />
+          </span>
+          <div>
+            <p className="text-sm font-medium text-foreground">No secret policies yet</p>
+            <p className="mt-1 max-w-xs text-sm text-muted-foreground">
+              Create a policy to restrict which secret paths a role's members may reach.
+              {canCreate && " Use “Create policy” above to get started."}
+            </p>
+          </div>
+        </div>
       )}
 
       {!isLoading && !isError && policies.length > 0 && (

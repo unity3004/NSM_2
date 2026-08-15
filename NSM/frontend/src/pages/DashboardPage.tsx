@@ -13,14 +13,12 @@ import { SecurityActivityTimeline } from "@/features/dashboard/SecurityActivityT
  * Query cache entry (["health"], the limit:5 audit-logs query) so this
  * page issues far fewer real requests than its section count suggests.
  *
- * `max-w-[1600px] mx-auto` matches the same convention the login page
- * uses — AppLayout's <main> itself has no width cap (correct for most
- * pages, e.g. wide tables), so this page caps itself rather than
- * stretching edge-to-edge on an ultrawide display.
+ * AppLayout's <main> already caps every route at max-w-[1600px] and
+ * centers it, so this page doesn't need its own width wrapper.
  */
 export function DashboardPage() {
   return (
-    <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6">
+    <div className="flex flex-col gap-6">
       <DashboardHeader />
       <SecurityStatusPanel />
       <PrimaryMetrics />

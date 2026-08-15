@@ -17,7 +17,7 @@ export function RoleDetailSheet({
 }) {
   return (
     <Sheet open={role !== null} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-md">
+      <SheetContent className="w-full sm:max-w-lg">
         <SheetHeader>
           <SheetTitle>{role?.name}</SheetTitle>
           <SheetDescription>{role?.description ?? "No description."}</SheetDescription>
