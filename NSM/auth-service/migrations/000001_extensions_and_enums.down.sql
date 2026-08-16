@@ -1,0 +1,2 @@
+-- Drop enum types. Safe only once every table using them is gone —
+-- i.e. only when rolling back the entire migration history in order.

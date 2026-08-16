@@ -1,0 +1,44 @@
+# Non-secret operational defaults, safe to commit — this file is read by
+# internal/config.Load with the LOWEST precedence: any environment
+# variable overrides the same key. It exists so a contributor can `go run
+# ./cmd/server` after only setting AUTH_JWT_SIGNING_KEY and
+# AUTH_DATABASE_PASSWORD, without retyping every timeout by hand.
+#
+# What belongs here: timeouts, pool sizes, log format — values that are
+# the same in every environment until someone deliberately tunes them.
+# What must never go here: database.password, jwt.signing_key, or anything
+# else internal/config.Config.Validate treats as a secret. Those have NO
+# default in code and NO entry in this file on purpose — they can only
+# come from an environment variable, which is what keeps them out of git
+# history. See ../README.md, "Why configuration is not hardcoded."
+
+environment: development
+
+server:
+  http_addr: ":8080"
+  read_timeout: 10s
+  write_timeout: 15s
+  shutdown_timeout: 15s
+  allowed_origins: []
+
+database:
+  host: localhost
+  port: 5432
+  user: authsvc
+  name: authdb
+  sslmode: disable
+  max_open_conns: 25
+  max_idle_conns: 25
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 2m
+
+jwt:
+  access_token_ttl: 15m
+  refresh_token_ttl: 720h
+
+rate_limit:
+  login_per_minute: 5
+
+log:
+  level: info
+  format: json

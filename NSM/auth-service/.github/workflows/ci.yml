@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push building main and simultaneously superseding an in-flight run on
+# the same branch is wasted compute — cancel the stale one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: authdb_test
+          POSTGRES_USER: authsvc
+          POSTGRES_PASSWORD: testpassword
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U authsvc -d authdb_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      # Same image/port/healthcheck as docker/docker-compose.yml's redis
+      # service — internal/ratelimit's Redis-backed abuse protection
+      # (Milestone 6C) needs a real Redis for test/integration/ratelimit_test.go
+      # to actually run instead of skipping.
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./... -race -covermode=atomic -coverprofile=coverage.out
+
+      - name: Run migrations against the test database
+        uses: docker://migrate/migrate:v4.17.1
+        with:
+          args: >-
+            -path=./migrations
+            -database=postgres://authsvc:testpassword@localhost:5432/authdb_test?sslmode=disable
+            up
+
+      - name: Integration tests
+        run: go test ./test/integration/... -tags=integration -race
+        env:
+          DATABASE_URL: postgres://authsvc:testpassword@localhost:5432/authdb_test?sslmode=disable
+          REDIS_ADDR: localhost:6379
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: auth-service:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

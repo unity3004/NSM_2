@@ -1,0 +1,105 @@
+# Local development stack only — not what runs in production (there, the
+# database is a managed instance and the app is one of several replicas
+# behind a load balancer, neither of which docker-compose models well).
+# `docker compose up` from this directory gets a new contributor from zero
+# to a running service against a real Postgres in one command.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: authdb
+      POSTGRES_USER: authsvc
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authsvc -d authdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Backs internal/ratelimit's Redis-based authentication abuse protection
+  # (Milestone 6C) — REDIS_ADDR=localhost:6379 from the host, or
+  # redis:6379 from inside this compose network, is what
+  # test/integration/ratelimit_test.go and the app service below expect.
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ../migrations:/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable",
+        "up",
+      ]
+
+  # Generates a disposable, local-only Ed25519 key for AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH
+  # below (see internal/config/config.go's AccessTokenConfig — Config.Validate
+  # hard-requires this since Milestone 5B) and exits — the same one-shot,
+  # depends_on/service_completed_successfully shape as the migrate service
+  # above. Nothing here is a real secret: cmd/devkeygen/main.go generates a
+  # fresh Ed25519 private key with crypto/rand every time this file is
+  # missing, targets the Dockerfile's own "build" stage purely because
+  # that's the one stage with a Go toolchain in it (the app image itself is
+  # distroless — see Dockerfile), and writes into ./.dev-secrets, which
+  # ../.gitignore excludes from version control. Skips regenerating (see
+  # devkeygen's own check) if a previous `docker compose up` already left a
+  # key behind, so the app doesn't get a new `kid` on every restart.
+  keygen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: build
+    entrypoint: ["go", "run", "./cmd/devkeygen", "/dev-secrets/access-token-signing-key.pem"]
+    volumes:
+      - ./.dev-secrets:/dev-secrets
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      # Everything else (timeouts, pool sizes, log format) comes from
+      # ../configs/config.yaml's defaults — only the secrets, plus this
+      # environment's database/Redis host, need overriding here. See
+      # ../internal/config/config.go and ../README.md's config section.
+      AUTH_ENVIRONMENT: "development"
+      AUTH_DATABASE_URL: "postgres://authsvc:devpassword@postgres:5432/authdb?sslmode=disable"
+      AUTH_JWT_SIGNING_KEY: "local-development-signing-key-not-for-prod-use"
+      AUTH_REDIS_ADDR: "redis:6379"
+      # key_id is just a label (see AccessTokenConfig.KeyID's own doc
+      # comment) — not secret. The actual private key material comes from
+      # the keygen service above, never from a literal here.
+      AUTH_ACCESS_TOKEN_KEY_ID: "dev-key-1"
+      AUTH_ACCESS_TOKEN_PRIVATE_KEY_PATH: "/dev-secrets/access-token-signing-key.pem"
+    volumes:
+      - ./.dev-secrets:/dev-secrets:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keygen:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
