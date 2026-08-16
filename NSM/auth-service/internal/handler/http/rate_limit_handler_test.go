@@ -159,7 +159,14 @@ func TestRefreshHandler_RateLimited(t *testing.T) {
 	}
 
 	req := refreshHTTPRequest(t, `{"refresh_token":"anything"}`)
-	req.Header.Set("X-Forwarded-For", "203.0.113.1")
+	// A direct client at this address, not a header — with no trusted
+	// proxy configured (SetTrustedProxies defaults to empty), clientIP
+	// now correctly ignores X-Forwarded-For entirely (see
+	// util.ResolveClientIP's own doc comment on why trusting it
+	// unconditionally was a spoofable rate-limit bypass), so the request
+	// must arrive from this IP directly for the pre-loaded block above to
+	// apply to it.
+	req.RemoteAddr = "203.0.113.1:54321"
 	rec := httptest.NewRecorder()
 	h.refresh(rec, req)
 

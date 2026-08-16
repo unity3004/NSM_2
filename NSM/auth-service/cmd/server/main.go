@@ -193,6 +193,12 @@ func main() {
 		AuditTx:  loginAuditTx,
 	})
 
+	// Must happen before the router (and therefore any request) can
+	// possibly run — see util.SetTrustedProxies' own doc comment for why
+	// this is a package-level value configured once here rather than
+	// threaded through every handler.
+	util.SetTrustedProxies(cfg.Server.TrustedProxies)
+
 	// --- delivery: HTTP handlers + router ---
 	router := httphandler.NewRouter(httphandler.RouterDeps{
 		AuthService:         authSvc,

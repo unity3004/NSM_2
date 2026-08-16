@@ -5,6 +5,7 @@ import (
 
 	"github.com/acme/auth-service/internal/dto"
 	"github.com/acme/auth-service/internal/service"
+	"github.com/acme/auth-service/internal/util"
 )
 
 type authHandler struct {
@@ -22,10 +23,7 @@ func organizationIDFromRequest(r *http.Request) string {
 }
 
 func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return fwd
-	}
-	return r.RemoteAddr
+	return util.ResolveClientIP(r)
 }
 
 func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {

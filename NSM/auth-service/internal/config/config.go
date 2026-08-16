@@ -48,6 +48,16 @@ type ServerConfig struct {
 	// AUTH_SERVER_ALLOWED_ORIGINS env var becomes this slice via the
 	// StringToSliceHookFunc registered in Load — see the comment there.
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	// TrustedProxies lists the CIDR ranges of reverse proxies/load
+	// balancers this deployment sits behind — see util.ResolveClientIP's
+	// own doc comment for exactly how this is used. Empty (the default)
+	// means "no trusted proxy": every client-IP resolution ignores
+	// X-Forwarded-For/X-Real-IP entirely and uses the TCP peer address
+	// only, which is the only safe default for a deployment that hasn't
+	// explicitly declared what sits in front of it — trusting either
+	// header by default would let any direct client spoof its own
+	// rate-limit/audit identity for free.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // DatabaseConfig describes the connection Postgres pool internal/database
