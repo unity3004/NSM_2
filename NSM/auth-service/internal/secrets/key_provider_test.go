@@ -149,3 +149,161 @@ func TestDevKeyProvider_ReturnsIndependentCopies(t *testing.T) {
 		t.Fatal("mutating one GetCurrentKey() result corrupted a later call's result — the provider is not returning independent copies")
 	}
 }
+
+// --- Multiple keys (Sprint 4 Task 1b: AddKey) ---
+
+func TestDevKeyProvider_AddKey_ThenGetKey_ResolvesBothKeys(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	v2B64 := newTestKeyBase64(t)
+	if err := p.AddKey("key-v2", v2B64); err != nil {
+		t.Fatalf("AddKey() error = %v, want nil", err)
+	}
+
+	if _, err := p.GetKey(context.Background(), "key-v1"); err != nil {
+		t.Errorf("GetKey(key-v1) after AddKey(key-v2), error = %v, want nil (the original key must remain resolvable)", err)
+	}
+	got, err := p.GetKey(context.Background(), "key-v2")
+	if err != nil {
+		t.Fatalf("GetKey(key-v2) error = %v, want nil", err)
+	}
+	want, _ := base64.StdEncoding.DecodeString(v2B64)
+	if string(got) != string(want) {
+		t.Error("GetKey(key-v2) returned different key bytes than AddKey was given")
+	}
+}
+
+// GetCurrentKey's contract is "the key this provider was constructed
+// with" — see its own doc comment for why AddKey deliberately does not
+// change that (KeyManager never re-asks a provider what's current after
+// bootstrap).
+func TestDevKeyProvider_AddKey_DoesNotChangeGetCurrentKey(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v2", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey() error = %v", err)
+	}
+
+	_, keyID, err := p.GetCurrentKey(context.Background())
+	if err != nil {
+		t.Fatalf("GetCurrentKey() error = %v", err)
+	}
+	if keyID != "key-v1" {
+		t.Errorf("GetCurrentKey() keyID = %q after AddKey(key-v2), want %q (unchanged)", keyID, "key-v1")
+	}
+}
+
+func TestDevKeyProvider_AddKey_DuplicateKeyIDFails(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v1", newTestKeyBase64(t)); err == nil {
+		t.Fatal("AddKey() with an already-registered key ID, error = nil, want an error")
+	}
+	// The original key's material must be unaffected by the refused
+	// overwrite attempt.
+	if _, err := p.GetKey(context.Background(), "key-v1"); err != nil {
+		t.Errorf("GetKey(key-v1) after a refused duplicate AddKey(), error = %v, want nil", err)
+	}
+}
+
+func TestDevKeyProvider_AddKey_MissingKeyIDFails(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("", newTestKeyBase64(t)); err == nil {
+		t.Fatal("AddKey() with an empty key ID, error = nil, want an error")
+	}
+}
+
+func TestDevKeyProvider_AddKey_InvalidBase64Fails(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v2", "not-valid-base64!!!"); !errors.Is(err, ErrKeyProviderMisconfigured) {
+		t.Errorf("AddKey() with invalid base64, error = %v, want ErrKeyProviderMisconfigured", err)
+	}
+	if _, err := p.GetKey(context.Background(), "key-v2"); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("GetKey(key-v2) after a rejected AddKey(), error = %v, want ErrKeyNotFound (must not be partially registered)", err)
+	}
+}
+
+func TestDevKeyProvider_AddKey_WrongLengthFails(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	short := make([]byte, 16)
+	if err := p.AddKey("key-v2", base64.StdEncoding.EncodeToString(short)); !errors.Is(err, ErrKeyProviderMisconfigured) {
+		t.Errorf("AddKey() with a 16-byte key, error = %v, want ErrKeyProviderMisconfigured", err)
+	}
+}
+
+func TestDevKeyProvider_AddKey_MissingMaterialFails(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v2", ""); !errors.Is(err, ErrKeyProviderMisconfigured) {
+		t.Errorf("AddKey() with no key material, error = %v, want ErrKeyProviderMisconfigured", err)
+	}
+}
+
+// Unknown key IDs remain refused after AddKey has been used at least
+// once — AddKey must not accidentally widen GetKey into accepting
+// anything.
+func TestDevKeyProvider_GetKey_StillRefusesUnknownIDAfterAddKey(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v2", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey() error = %v", err)
+	}
+	if _, err := p.GetKey(context.Background(), "key-v3-never-added"); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("GetKey() with an unregistered key ID, error = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// Each registered key's GetKey result must be an independent copy, the
+// same guarantee TestDevKeyProvider_ReturnsIndependentCopies already
+// proves for the constructor's own key — mutating one key ID's returned
+// bytes must never corrupt another key ID's stored material.
+func TestDevKeyProvider_AddKey_ReturnsIndependentCopies(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v2", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey() error = %v", err)
+	}
+
+	got, err := p.GetKey(context.Background(), "key-v2")
+	if err != nil {
+		t.Fatalf("GetKey(key-v2) error = %v", err)
+	}
+	for i := range got {
+		got[i] = 0xAB
+	}
+	again, err := p.GetKey(context.Background(), "key-v2")
+	if err != nil {
+		t.Fatalf("GetKey(key-v2) second call, error = %v", err)
+	}
+	allMutated := true
+	for _, b := range again {
+		if b != 0xAB {
+			allMutated = false
+			break
+		}
+	}
+	if allMutated {
+		t.Fatal("mutating one GetKey() result corrupted the provider's own stored key material")
+	}
+}

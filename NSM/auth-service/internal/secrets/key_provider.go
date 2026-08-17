@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // ErrKeyProviderMisconfigured means a KeyProvider was asked to operate
@@ -68,22 +69,34 @@ type KeyProvider interface {
 // devKeyLength is AES-256's key length in bytes.
 const devKeyLength = 32
 
-// DevKeyProvider is a KeyProvider backed by a single AES-256 key supplied
-// once, at construction, from configuration (config.SecretsConfig.DevMasterKey
-// — sourced via AUTH_SECRETS_DEV_MASTER_KEY, following the exact same
-// "never a literal in source" convention as jwt.signing_key and
-// access_token.private_key_pem).
+// DevKeyProvider is a KeyProvider backed by AES-256 key material supplied
+// in-process — one key at construction, from configuration
+// (config.SecretsConfig.DevMasterKey — sourced via
+// AUTH_SECRETS_DEV_MASTER_KEY, following the exact same "never a literal
+// in source" convention as jwt.signing_key and access_token.private_key_pem),
+// plus, since Sprint 4 Task 1b, any number of additional keys registered
+// afterward via AddKey — so that KeyManager.Rotate has real (if
+// dev-grade) key material to rotate to when it is exercised against this
+// provider directly, rather than only against a test-only fake. Rotating
+// through KeyManager never asks this provider to change its own idea of
+// "current" — see GetCurrentKey's own doc comment for why AddKey alone is
+// sufficient.
 //
 // DEVELOPMENT ONLY. This is not equivalent to a production KMS/HSM in any
-// respect: the key is held in this process's memory for its entire
-// lifetime, is never rotated, has no access audit trail, and is only as
-// protected as whatever holds the environment variable it came from —
-// none of a real KMS's hardware isolation, access logging, or
+// respect: every key is held in this process's memory for its entire
+// lifetime, none has any access audit trail independent of this
+// application's own, and each is only as protected as whatever supplied
+// its base64 value (an environment variable, a test literal) — none of a
+// real KMS's hardware isolation, access logging, or
 // rotation-without-re-encryption properties apply. Never point this at a
-// production deployment.
+// production deployment; see secrets.KeyProvider's own doc comment for
+// how a real KMS/HSM-backed implementation plugs in instead, and
+// NSM/key-management-architecture.md §7 for the full list of what
+// distinguishes this from production key management.
 type DevKeyProvider struct {
+	mu    sync.RWMutex
 	keyID string
-	key   []byte
+	keys  map[string][]byte
 }
 
 // NewDevKeyProvider builds a DevKeyProvider from a base64-encoded 256-bit
@@ -104,6 +117,50 @@ func NewDevKeyProvider(keyID, keyBase64 string) (*DevKeyProvider, error) {
 	if keyBase64 == "" {
 		return nil, fmt.Errorf("%w: no key material configured (set AUTH_SECRETS_DEV_MASTER_KEY)", ErrKeyProviderMisconfigured)
 	}
+	key, err := decodeDevKeyMaterial(keyBase64)
+	if err != nil {
+		return nil, err
+	}
+	return &DevKeyProvider{keyID: keyID, keys: map[string][]byte{keyID: key}}, nil
+}
+
+// AddKey registers an additional key identifier and its material with an
+// already-constructed DevKeyProvider — for tests, and for exercising
+// KeyManager.Rotate against genuine (if still dev-grade) key material
+// instead of only the fakeMultiKeyProvider test double internal/secrets'
+// own tests otherwise rely on. Fails closed exactly like
+// NewDevKeyProvider: an empty key ID, missing/malformed/wrong-length
+// material, or a keyID this provider already knows about are all
+// rejected here rather than silently overwriting existing material.
+//
+// This does not change what GetCurrentKey returns — see that method's
+// own doc comment for why that is correct, not a limitation.
+func (p *DevKeyProvider) AddKey(keyID, keyBase64 string) error {
+	if keyID == "" {
+		return fmt.Errorf("secrets: DevKeyProvider.AddKey: key ID is required")
+	}
+	if keyBase64 == "" {
+		return fmt.Errorf("%w: no key material given for key ID %q", ErrKeyProviderMisconfigured, keyID)
+	}
+	key, err := decodeDevKeyMaterial(keyBase64)
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.keys[keyID]; exists {
+		return fmt.Errorf("secrets: DevKeyProvider.AddKey: key ID %q is already registered", keyID)
+	}
+	p.keys[keyID] = key
+	return nil
+}
+
+// decodeDevKeyMaterial validates and decodes a base64-encoded key value —
+// the shared shape check both NewDevKeyProvider and AddKey enforce, so
+// there is exactly one place that defines "what a valid dev key looks
+// like" to audit or extend.
+func decodeDevKeyMaterial(keyBase64 string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(keyBase64)
 	if err != nil {
 		return nil, fmt.Errorf("%w: key is not valid base64", ErrKeyProviderMisconfigured)
@@ -111,30 +168,50 @@ func NewDevKeyProvider(keyID, keyBase64 string) (*DevKeyProvider, error) {
 	if len(key) != devKeyLength {
 		return nil, fmt.Errorf("%w: key must decode to exactly %d bytes (256 bits), got %d", ErrKeyProviderMisconfigured, devKeyLength, len(key))
 	}
-	return &DevKeyProvider{keyID: keyID, key: key}, nil
+	return key, nil
 }
 
-// GetCurrentKey implements KeyProvider. DevKeyProvider has exactly one
-// key, so this always returns it — there is no rotation to choose
-// between candidates from.
+// GetCurrentKey implements KeyProvider. Always returns the one key this
+// provider was originally *constructed* with, regardless of how many
+// more have since been registered via AddKey — this is correct, not a
+// limitation: KeyManager.GetCurrentKey only ever calls a provider's
+// GetCurrentKey once, during first-ever bootstrap (see
+// KeyManager.bootstrapFromProvider), to learn the very first ACTIVE key.
+// Every later call — including the provider's view of "current" after
+// KeyManager.Rotate — resolves through KeyManager's own encryption_keys
+// metadata instead, via GetKey(ctx, thatSpecificID), never by re-asking
+// the provider what is current. A DevKeyProvider therefore never needs
+// its own mutable "current key" concept for rotation to work correctly.
 func (p *DevKeyProvider) GetCurrentKey(ctx context.Context) ([]byte, string, error) {
-	return p.copyKey(), p.keyID, nil
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.copyKeyLocked(p.keyID), p.keyID, nil
 }
 
-// GetKey implements KeyProvider.
+// GetKey implements KeyProvider — resolves any key this provider was
+// constructed with or has since had registered via AddKey.
 func (p *DevKeyProvider) GetKey(ctx context.Context, keyID string) ([]byte, error) {
-	if keyID != p.keyID {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	key, ok := p.keys[keyID]
+	if !ok {
 		return nil, ErrKeyNotFound
 	}
-	return p.copyKey(), nil
+	return copyKeyBytes(key), nil
 }
 
-// copyKey returns a fresh copy of the provider's key material rather than
-// a reference to its own backing array — so a caller zeroing its copy
-// after use (see EncryptionService) can never zero out this provider's
-// only copy out from under a concurrent or later call.
-func (p *DevKeyProvider) copyKey() []byte {
-	k := make([]byte, len(p.key))
-	copy(k, p.key)
+// copyKeyLocked is copyKeyBytes for a key already known to be in p.keys —
+// callers must hold p.mu.
+func (p *DevKeyProvider) copyKeyLocked(keyID string) []byte {
+	return copyKeyBytes(p.keys[keyID])
+}
+
+// copyKeyBytes returns a fresh copy of key rather than a reference to its
+// own backing array — so a caller zeroing its copy after use (see
+// EncryptionService) can never zero out this provider's only copy out
+// from under a concurrent or later call.
+func copyKeyBytes(key []byte) []byte {
+	k := make([]byte, len(key))
+	copy(k, key)
 	return k
 }

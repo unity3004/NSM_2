@@ -479,3 +479,116 @@ func TestKeyManager_Metadata_UnknownKey(t *testing.T) {
 		t.Errorf("Metadata() of an unknown key, error = %v, want ErrKeyNotFound", err)
 	}
 }
+
+// --- Rotation against the real DevKeyProvider, not just the fake ---
+//
+// Every test above uses fakeMultiKeyProvider specifically because
+// DevKeyProvider was previously single-key-only (see that type's old doc
+// comment) — meaning KeyManager.Rotate had never actually been exercised
+// against the real development KeyProvider implementation this
+// deployment uses, only against a test double. DevKeyProvider.AddKey
+// (Sprint 4 Task 1b) closes that gap.
+
+func TestKeyManager_Rotate_AgainstRealDevKeyProvider(t *testing.T) {
+	provider, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := provider.AddKey("key-v2", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey() error = %v", err)
+	}
+	km, store := newTestKeyManager(t, provider)
+	enc := NewEncryptionService(km)
+	ctx := context.Background()
+
+	// Bootstrap onto key-v1, encrypt a value under it (the "existing
+	// data" this deployment already has before any rotation happens).
+	ec1 := EncryptContext{SecretID: "secret-1", Version: 1}
+	payload1, err := enc.Encrypt(ctx, []byte("pre-rotation-value"), ec1)
+	if err != nil {
+		t.Fatalf("Encrypt() before rotation, error = %v", err)
+	}
+	if payload1.KeyID != "key-v1" {
+		t.Fatalf("Encrypt() before rotation used KeyID %q, want key-v1", payload1.KeyID)
+	}
+
+	// 3. Active key selection: rotate to key-v2 against the real provider.
+	if _, err := km.Rotate(ctx, "key-v2"); err != nil {
+		t.Fatalf("Rotate() against a real DevKeyProvider, error = %v, want nil", err)
+	}
+	active, err := store.GetActive(ctx)
+	if err != nil || active.KeyID != "key-v2" {
+		t.Fatalf("after Rotate(), active key = %+v (err %v), want key-v2", active, err)
+	}
+
+	// New encryption uses the newly active key.
+	ec2 := EncryptContext{SecretID: "secret-1", Version: 2}
+	payload2, err := enc.Encrypt(ctx, []byte("post-rotation-value"), ec2)
+	if err != nil {
+		t.Fatalf("Encrypt() after rotation, error = %v", err)
+	}
+	if payload2.KeyID != "key-v2" {
+		t.Errorf("Encrypt() after rotation used KeyID %q, want key-v2", payload2.KeyID)
+	}
+
+	// 4. Old keys: the pre-rotation ciphertext (key-v1, now RETIRING)
+	// still decrypts correctly against the real provider.
+	got1, err := enc.Decrypt(ctx, payload1, ec1)
+	if err != nil {
+		t.Fatalf("Decrypt() of pre-rotation ciphertext after rotation, error = %v, want nil", err)
+	}
+	if string(got1) != "pre-rotation-value" {
+		t.Errorf("Decrypt() pre-rotation value = %q, want %q", got1, "pre-rotation-value")
+	}
+	got2, err := enc.Decrypt(ctx, payload2, ec2)
+	if err != nil {
+		t.Fatalf("Decrypt() of post-rotation ciphertext, error = %v, want nil", err)
+	}
+	if string(got2) != "post-rotation-value" {
+		t.Errorf("Decrypt() post-rotation value = %q, want %q", got2, "post-rotation-value")
+	}
+}
+
+// TestBackwardCompatibility_ExistingSingleKeyDataStillDecrypts is the
+// objective's own explicit regression requirement: data encrypted before
+// this task's changes (i.e. under a DevKeyProvider used exactly the way
+// it always has been — one key, constructed via NewDevKeyProvider, never
+// touched by AddKey) must still decrypt correctly once AddKey/rotation
+// capability exists in the same process. AddKey is purely additive to
+// DevKeyProvider's internal map; it must never alter the constructor
+// key's own material or identifier.
+func TestBackwardCompatibility_ExistingSingleKeyDataStillDecrypts(t *testing.T) {
+	provider, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	km, _ := newTestKeyManager(t, provider)
+	enc := NewEncryptionService(km)
+	ctx := context.Background()
+	ec := EncryptContext{SecretID: "pre-existing-secret", Version: 1}
+
+	// Simulates data that was already encrypted before this deployment
+	// ever gained multi-key capability.
+	existing, err := enc.Encrypt(ctx, []byte("value encrypted before this task"), ec)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+
+	// New capability is exercised afterward, in the same running process.
+	if err := provider.AddKey("key-v2", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey() error = %v", err)
+	}
+	if _, err := km.Rotate(ctx, "key-v2"); err != nil {
+		t.Fatalf("Rotate() error = %v", err)
+	}
+
+	// The pre-existing ciphertext must still decrypt, byte-for-byte,
+	// after all of that.
+	plaintext, err := enc.Decrypt(ctx, existing, ec)
+	if err != nil {
+		t.Fatalf("Decrypt() of pre-existing data after AddKey+Rotate, error = %v, want nil", err)
+	}
+	if string(plaintext) != "value encrypted before this task" {
+		t.Errorf("Decrypt() = %q, want the original plaintext unchanged", plaintext)
+	}
+}
