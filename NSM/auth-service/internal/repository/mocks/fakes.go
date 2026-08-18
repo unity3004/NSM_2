@@ -715,6 +715,13 @@ type FakeSecretRepository struct {
 	// version write failed, the secret must not be left half-created"
 	// without a real database.
 	FailNextCreateVersion error
+	// FailNextReEncrypt, if non-nil, is returned by the next
+	// ReEncryptVersion call instead of succeeding, then reset to nil —
+	// the same fault-injection convention as FailNextCreateVersion, for
+	// exercising service.ReEncryptionService's "a database update
+	// failure must leave the record valid" requirement without a real
+	// database.
+	FailNextReEncrypt error
 }
 
 func NewFakeSecretRepository() *FakeSecretRepository {
@@ -926,6 +933,79 @@ func (f *FakeSecretRepository) CountVersionsByKeyID(_ context.Context, keyID str
 		}
 	}
 	return count, nil
+}
+
+// ListVersionsByKeyID mirrors postgres.secretRepository.ListVersionsByKeyID:
+// cross-secret scope, soft-deleted versions included, ordered (here, by
+// SecretID then Version, since this fake has no id-ordering column of its
+// own to sort by) for a stable, repeatable scan — a real *entity.SecretVersion
+// pointer is returned, the same aliasing SeedVersion/createVersion already
+// rely on, so a caller's later ReEncryptVersion call finds the same
+// in-memory row.
+func (f *FakeSecretRepository) ListVersionsByKeyID(_ context.Context, keyID string, limit int) ([]*entity.SecretVersion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var out []*entity.SecretVersion
+	secretIDs := make([]string, 0, len(f.versions))
+	for id := range f.versions {
+		secretIDs = append(secretIDs, id)
+	}
+	sort.Strings(secretIDs)
+	for _, id := range secretIDs {
+		for _, v := range f.versions[id] {
+			if v.KeyID == keyID {
+				out = append(out, v)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SecretID != out[j].SecretID {
+			return out[i].SecretID < out[j].SecretID
+		}
+		return out[i].Version < out[j].Version
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// ReEncryptVersion mirrors postgres.secretRepository.ReEncryptVersion's
+// compare-and-swap contract exactly: finds versionID by scanning every
+// secret's version slice (this fake has no separate id->row index), and
+// only overwrites the six envelope fields if the row's current KeyID
+// still equals expectedKeyID — otherwise a no-op (false, nil), never an
+// error, the same idempotency/concurrency guarantee the real
+// implementation provides.
+func (f *FakeSecretRepository) ReEncryptVersion(_ context.Context, versionID string, envelope repository.ReEncryptedEnvelope, expectedKeyID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailNextReEncrypt != nil {
+		err := f.FailNextReEncrypt
+		f.FailNextReEncrypt = nil
+		return false, err
+	}
+	for _, versions := range f.versions {
+		for _, v := range versions {
+			if v.ID != versionID {
+				continue
+			}
+			if v.KeyID != expectedKeyID {
+				return false, nil
+			}
+			v.Ciphertext = envelope.Ciphertext
+			v.Nonce = envelope.Nonce
+			v.AuthTag = envelope.AuthTag
+			v.WrappedDEK = envelope.WrappedDEK
+			v.KeyID = envelope.KeyID
+			v.Algorithm = envelope.Algorithm
+			return true, nil
+		}
+	}
+	return false, entity.ErrNotFound
 }
 
 // FakeRBACRepository implements repository.RBACRepository over an

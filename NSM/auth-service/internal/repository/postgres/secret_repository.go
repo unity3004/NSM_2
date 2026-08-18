@@ -297,3 +297,58 @@ func (r *secretRepository) SoftDeleteVersion(ctx context.Context, secretID strin
 		secretID, version)
 	return checkRowsAffected(res, err)
 }
+
+// ListVersionsByKeyID deliberately does not filter deleted_at IS NULL —
+// see CountVersionsByKeyID's own doc comment for why soft-deleted
+// versions still need re-encryption too (their ciphertext is still
+// present and still needs a usable key). Ordered by id for a stable,
+// repeatable scan order across repeated calls as rows are migrated out
+// from under it — see the interface's own doc comment for why that's
+// what makes an interrupted migration resumable with no separate cursor.
+func (r *secretRepository) ListVersionsByKeyID(ctx context.Context, keyID string, limit int) ([]*entity.SecretVersion, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+secretVersionColumns+` FROM secret_versions WHERE key_id = $1 ORDER BY id LIMIT $2`,
+		keyID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var versions []*entity.SecretVersion
+	for rows.Next() {
+		v, err := scanSecretVersion(rows)
+		if err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
+// ReEncryptVersion is a single UPDATE statement — already atomic on its
+// own (Postgres autocommits one statement), so no explicit
+// BeginTx/Commit is needed here the way CreateVersion needs one to span
+// its row-lock-then-insert-then-update sequence. This is deliberate:
+// the objective's own "a database transaction should protect each
+// individual record update... do not hold one giant transaction across
+// the entire migration" requirement is satisfied by every record's
+// update being its own short, independent statement, not by wrapping
+// this method in a transaction of its own.
+func (r *secretRepository) ReEncryptVersion(ctx context.Context, versionID string, v repository.ReEncryptedEnvelope, expectedKeyID string) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE secret_versions
+		SET ciphertext = $1, nonce = $2, auth_tag = $3, wrapped_dek = $4, key_id = $5, algorithm = $6
+		WHERE id = $7 AND key_id = $8`,
+		v.Ciphertext, v.Nonce, v.AuthTag, v.WrappedDEK, v.KeyID, v.Algorithm, versionID, expectedKeyID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}

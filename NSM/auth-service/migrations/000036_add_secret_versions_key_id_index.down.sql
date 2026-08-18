@@ -1,0 +1,1 @@
+DROP INDEX idx_secret_versions_key_id;

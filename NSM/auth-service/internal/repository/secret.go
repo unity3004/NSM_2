@@ -75,6 +75,66 @@ type SecretRepository interface {
 	// key to ever be readable again, even though SecretService's normal
 	// reads skip them.
 	CountVersionsByKeyID(ctx context.Context, keyID string) (int, error)
+
+	// ListVersionsByKeyID returns up to limit secret_versions rows —
+	// across every secret and organization, the same platform-wide scope
+	// CountVersionsByKeyID already uses and for the identical reason —
+	// still encrypted under keyID. Soft-deleted versions are included,
+	// same as CountVersionsByKeyID. Used by
+	// service.ReEncryptionService to find bounded batches of work: each
+	// call naturally returns the "next" unprocessed batch with no cursor
+	// of its own needed, because ReEncryptVersion moves a row's key_id
+	// away from keyID the moment it succeeds — an identical repeated
+	// call to this method simply stops seeing a row once it has been
+	// migrated, which is also what makes an interrupted migration safe
+	// to resume with no separate progress bookkeeping (see that
+	// service's own doc comment). limit <= 0 means a sane default, not
+	// "unbounded" — this method never returns more than a bounded page
+	// in one call.
+	ListVersionsByKeyID(ctx context.Context, keyID string, limit int) ([]*entity.SecretVersion, error)
+
+	// ReEncryptVersion atomically replaces versionID's encryption
+	// envelope — ciphertext, nonce, auth_tag, wrapped_dek, key_id,
+	// algorithm — and nothing else. This is the one deliberate, narrow
+	// exception to this interface's own "versions are immutable" rule
+	// (see this interface's package doc comment above): a version's
+	// logical VALUE — what it decrypts to — is unchanged by construction
+	// (the caller, service.ReEncryptionService, only ever writes back
+	// what it just decrypted from the same row and immediately
+	// re-encrypted; it never receives or accepts different plaintext),
+	// only its storage representation changes. This method's own
+	// signature makes it structurally impossible to use for anything
+	// else — v carries only the six envelope fields, never Version,
+	// SecretID, CreatedBy, CreatedAt, or DeletedAt.
+	//
+	// expectedKeyID is an optimistic-concurrency, compare-and-swap guard:
+	// the update only applies if the row's key_id still equals
+	// expectedKeyID at write time. If the row was already re-encrypted —
+	// by an earlier run, or a concurrent run of the same migration —
+	// since the caller last read it, expectedKeyID no longer matches,
+	// this is a no-op (reencrypted is false), never an error and never a
+	// corrupted write. This is the same mechanism that makes running a
+	// migration twice safe (the second run's every candidate row already
+	// fails this check, because ListVersionsByKeyID no longer returns
+	// them in the first place).
+	ReEncryptVersion(ctx context.Context, versionID string, v ReEncryptedEnvelope, expectedKeyID string) (reencrypted bool, err error)
+}
+
+// ReEncryptedEnvelope is the new encryption envelope
+// SecretRepository.ReEncryptVersion writes for one row — field-for-field
+// the same six columns entity.SecretVersion already carries, deliberately
+// its own small type (not a full *entity.SecretVersion, and not
+// secrets.EncryptedPayload — this package does not import
+// internal/secrets; see entity.SecretVersion's own doc comment on why
+// this layer stays independent of it) so ReEncryptVersion's signature
+// cannot be mistaken for a general-purpose version update.
+type ReEncryptedEnvelope struct {
+	Ciphertext []byte
+	Nonce      []byte
+	AuthTag    []byte
+	WrappedDEK []byte
+	KeyID      string
+	Algorithm  string
 }
 
 // SecretFilter narrows SecretRepository.List. Zero value means "no filter".
