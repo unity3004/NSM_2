@@ -307,3 +307,133 @@ func TestDevKeyProvider_AddKey_ReturnsIndependentCopies(t *testing.T) {
 		t.Fatal("mutating one GetKey() result corrupted the provider's own stored key material")
 	}
 }
+
+// --- GenerateKey (KeyGenerator) ---
+
+func TestDevKeyProvider_GenerateKey_ProducesUsableKey(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	keyID, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v, want nil", err)
+	}
+	if keyID == "" || keyID == "key-v1" {
+		t.Fatalf("GenerateKey() returned keyID %q, want a new, non-empty identifier", keyID)
+	}
+	key, err := p.GetKey(context.Background(), keyID)
+	if err != nil {
+		t.Fatalf("GetKey(%q) after GenerateKey(), error = %v, want nil", keyID, err)
+	}
+	if len(key) != devKeyLength {
+		t.Errorf("GenerateKey()'s key material is %d bytes, want %d", len(key), devKeyLength)
+	}
+}
+
+func TestDevKeyProvider_GenerateKey_SequentialIDs(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	first, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("first GenerateKey() error = %v", err)
+	}
+	if first != "key-v2" {
+		t.Errorf("first GenerateKey() = %q, want %q", first, "key-v2")
+	}
+	second, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("second GenerateKey() error = %v", err)
+	}
+	if second != "key-v3" {
+		t.Errorf("second GenerateKey() = %q, want %q", second, "key-v3")
+	}
+}
+
+// GenerateKey must keep working correctly even when a key was registered
+// out of sequence (or with a non-key-vN-shaped ID) via AddKey directly —
+// it scans existing IDs rather than trusting a separate counter.
+func TestDevKeyProvider_GenerateKey_ContinuesCorrectlyAfterManualAddKey(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if err := p.AddKey("key-v5", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey(key-v5) error = %v", err)
+	}
+	if err := p.AddKey("operator-provisioned-key", newTestKeyBase64(t)); err != nil {
+		t.Fatalf("AddKey(operator-provisioned-key) error = %v", err)
+	}
+
+	next, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	if next != "key-v6" {
+		t.Errorf("GenerateKey() after key-v5 was added manually = %q, want %q", next, "key-v6")
+	}
+}
+
+func TestDevKeyProvider_GenerateKey_DoesNotChangeGetCurrentKey(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	if _, err := p.GenerateKey(context.Background()); err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+
+	_, keyID, err := p.GetCurrentKey(context.Background())
+	if err != nil {
+		t.Fatalf("GetCurrentKey() error = %v", err)
+	}
+	if keyID != "key-v1" {
+		t.Errorf("GetCurrentKey() keyID = %q after GenerateKey(), want %q (unchanged)", keyID, "key-v1")
+	}
+}
+
+func TestDevKeyProvider_GenerateKey_ProducesUniqueMaterialEachCall(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+
+	id1, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("first GenerateKey() error = %v", err)
+	}
+	id2, err := p.GenerateKey(context.Background())
+	if err != nil {
+		t.Fatalf("second GenerateKey() error = %v", err)
+	}
+	key1, err := p.GetKey(context.Background(), id1)
+	if err != nil {
+		t.Fatalf("GetKey(%q) error = %v", id1, err)
+	}
+	key2, err := p.GetKey(context.Background(), id2)
+	if err != nil {
+		t.Fatalf("GetKey(%q) error = %v", id2, err)
+	}
+	if string(key1) == string(key2) {
+		t.Fatal("two GenerateKey() calls produced identical key material")
+	}
+}
+
+// Compile-time interface satisfaction is asserted in key_provider.go
+// itself; this proves it holds at the call-site level too, the way
+// service.KeyRotationService actually uses it (as a plain KeyGenerator
+// value, no concrete-type knowledge).
+func TestDevKeyProvider_SatisfiesKeyGenerator(t *testing.T) {
+	p, err := NewDevKeyProvider("key-v1", newTestKeyBase64(t))
+	if err != nil {
+		t.Fatalf("NewDevKeyProvider() error = %v", err)
+	}
+	var gen KeyGenerator = p
+	if _, err := gen.GenerateKey(context.Background()); err != nil {
+		t.Errorf("DevKeyProvider used as a bare KeyGenerator, GenerateKey() error = %v, want nil", err)
+	}
+}

@@ -19,6 +19,7 @@ package secrets
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -64,6 +65,28 @@ type KeyProvider interface {
 	// that isn't necessarily under the current key anymore. Returns
 	// ErrKeyNotFound if no key with that identifier is known.
 	GetKey(ctx context.Context, keyID string) (key []byte, err error)
+}
+
+// KeyGenerator is an optional capability a KeyProvider MAY also
+// implement, for providers that can mint their own fresh key material
+// and identifier on demand — DevKeyProvider does (see GenerateKey); a
+// real KMS/HSM-backed KeyProvider is not expected to (see DevKeyProvider's
+// own doc comment). Provisioning a new production key remains a
+// deliberate, out-of-band operator action — see
+// NSM/key-management-architecture.md §7 — never something this codebase
+// automates end-to-end for a real deployment. Kept as a separate
+// interface from KeyProvider itself, rather than a third KeyProvider
+// method, so a KMS-backed implementation is never forced to either
+// implement it or explain why it doesn't: EncryptionService and
+// KeyManager depend only on KeyProvider, never on this.
+type KeyGenerator interface {
+	// GenerateKey mints fresh, random key material, registers it under a
+	// new identifier, and returns that identifier. The caller (see
+	// service.KeyRotationService.RotateToNewKey) is then expected to
+	// activate it through the normal KeyManager.Rotate path, exactly as
+	// if an operator had provisioned the key out-of-band and handed over
+	// its ID.
+	GenerateKey(ctx context.Context) (keyID string, err error)
 }
 
 // devKeyLength is AES-256's key length in bytes.
@@ -156,6 +179,53 @@ func (p *DevKeyProvider) AddKey(keyID, keyBase64 string) error {
 	return nil
 }
 
+// GenerateKey implements KeyGenerator — DEVELOPMENT ONLY, like every
+// other DevKeyProvider capability (see this type's own doc comment). It
+// mints devKeyLength random bytes via crypto/rand (the same source
+// EncryptionService itself uses for DEKs and nonces) under a fresh
+// sequential identifier — "key-v1", "key-v2", ... one past the highest
+// key-vN this provider currently knows about, the same naming convention
+// KeyManager.Rotate's own examples already use. A real KMS assigns its
+// own key identifiers (ARNs, resource names) and does not hand back raw
+// key bytes for a newly minted key the way this dev-only method does —
+// see KeyGenerator's own doc comment for why that capability is not part
+// of the core KeyProvider interface.
+func (p *DevKeyProvider) GenerateKey(ctx context.Context) (string, error) {
+	key := make([]byte, devKeyLength)
+	if _, err := rand.Read(key); err != nil {
+		return "", fmt.Errorf("secrets: DevKeyProvider.GenerateKey: generating random key material: %w", err)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keyID := p.nextKeyIDLocked()
+	if _, exists := p.keys[keyID]; exists {
+		// Unreachable in practice (nextKeyIDLocked always picks an ID
+		// absent from p.keys) — fails loudly rather than silently
+		// overwriting an existing key if it ever somehow happens.
+		return "", fmt.Errorf("secrets: DevKeyProvider.GenerateKey: generated ID %q collides with an existing key", keyID)
+	}
+	p.keys[keyID] = key
+	return keyID, nil
+}
+
+// nextKeyIDLocked returns "key-vN" for the smallest N not already present
+// in p.keys — callers must hold p.mu. Scans existing IDs rather than
+// keeping a separate counter, so it stays correct even when AddKey was
+// used directly (bypassing GenerateKey) to register a key out of
+// sequence, or with an ID that doesn't fit the key-vN shape at all (those
+// are simply ignored by the scan).
+func (p *DevKeyProvider) nextKeyIDLocked() string {
+	max := 0
+	for id := range p.keys {
+		var n int
+		if _, err := fmt.Sscanf(id, "key-v%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return fmt.Sprintf("key-v%d", max+1)
+}
+
 // decodeDevKeyMaterial validates and decodes a base64-encoded key value —
 // the shared shape check both NewDevKeyProvider and AddKey enforce, so
 // there is exactly one place that defines "what a valid dev key looks
@@ -215,3 +285,11 @@ func copyKeyBytes(key []byte) []byte {
 	copy(k, key)
 	return k
 }
+
+// Compile-time proof that DevKeyProvider satisfies both interfaces —
+// GenerateKey is genuinely optional (KeyGenerator is never required by
+// KeyProvider itself), but DevKeyProvider always implements it.
+var (
+	_ KeyProvider  = (*DevKeyProvider)(nil)
+	_ KeyGenerator = (*DevKeyProvider)(nil)
+)

@@ -30,17 +30,31 @@ import (
 // section for how these methods are meant to be invoked (an operator
 // tool/admin CLI, a later phase) and by whom.
 type KeyRotationService struct {
-	keyManager *secrets.KeyManager
-	secretRepo repository.SecretRepository
-	auditTx    AuditTxFunc
+	keyManager   *secrets.KeyManager
+	secretRepo   repository.SecretRepository
+	auditTx      AuditTxFunc
+	keyGenerator secrets.KeyGenerator
 }
+
+// ErrKeyGenerationUnsupported means RotateToNewKey was called against a
+// KeyRotationService whose KeyProvider does not implement
+// secrets.KeyGenerator — e.g. a real KMS-backed deployment, where
+// provisioning a new key is a deliberate, out-of-band operator action
+// (see NSM/key-management-architecture.md §7), not something this
+// codebase can do on the caller's behalf. Such a deployment still uses
+// RotateKey directly, with a key ID it has already provisioned through
+// its KMS.
+var ErrKeyGenerationUnsupported = errors.New("service: this deployment's key provider does not support generating new keys automatically")
 
 // NewKeyRotationService constructs a KeyRotationService. auditTx may be
 // nil, the same allowance every other AuditTx dependency in this codebase
 // makes (see SecretService.NewSecretService) — every operation still
-// succeeds, it just doesn't get an audit trail entry.
-func NewKeyRotationService(keyManager *secrets.KeyManager, secretRepo repository.SecretRepository, auditTx AuditTxFunc) *KeyRotationService {
-	return &KeyRotationService{keyManager: keyManager, secretRepo: secretRepo, auditTx: auditTx}
+// succeeds, it just doesn't get an audit trail entry. keyGenerator may
+// also be nil — RotateKey/RetireKey/DisableKey/EnsureBootstrapped all
+// work without one; only RotateToNewKey requires it (see
+// ErrKeyGenerationUnsupported).
+func NewKeyRotationService(keyManager *secrets.KeyManager, secretRepo repository.SecretRepository, auditTx AuditTxFunc, keyGenerator secrets.KeyGenerator) *KeyRotationService {
+	return &KeyRotationService{keyManager: keyManager, secretRepo: secretRepo, auditTx: auditTx, keyGenerator: keyGenerator}
 }
 
 // EnsureBootstrapped registers the key provider's current key as this
@@ -104,6 +118,40 @@ func (s *KeyRotationService) RotateKey(ctx context.Context, actorUserID, newKeyI
 	s.recordKeyAudit(ctx, "key.rotation_completed", actor, newKeyID, entity.AuditResultSuccess, ipAddress, nil)
 	s.recordKeyAudit(ctx, "key.activated", actor, newKeyID, entity.AuditResultSuccess, ipAddress, nil)
 	return meta, nil
+}
+
+// RotateToNewKey is the single-call rotation engine: CURRENT KEY -> NEW
+// KEY CREATED -> NEW KEY ACTIVE -> OLD KEY (PREVIOUS/RETIRING), all in one
+// operation, for a KeyProvider that can mint its own key material (see
+// secrets.KeyGenerator). It mints a brand-new key via the configured
+// KeyGenerator, records key.created for it, then activates it through the
+// exact same RotateKey path an operator-provisioned key ID already uses
+// — so the resulting audit trail, atomicity, and safety guarantees
+// (new key verified available, old/new transition atomic, never two
+// ACTIVE keys) are identical to RotateKey's own; this method only adds
+// where the new key ID and material come from.
+//
+// Returns ErrKeyGenerationUnsupported if this service was constructed
+// with no KeyGenerator (see NewKeyRotationService) — e.g. a real
+// KMS-backed deployment must provision a key through its KMS out-of-band
+// and call RotateKey with that key's ID directly instead.
+func (s *KeyRotationService) RotateToNewKey(ctx context.Context, actorUserID, ipAddress string) (secrets.KeyMetadata, error) {
+	if actorUserID == "" {
+		return secrets.KeyMetadata{}, entity.ErrForbidden
+	}
+	if s.keyGenerator == nil {
+		return secrets.KeyMetadata{}, ErrKeyGenerationUnsupported
+	}
+
+	newKeyID, err := s.keyGenerator.GenerateKey(ctx)
+	if err != nil {
+		return secrets.KeyMetadata{}, fmt.Errorf("service: generating new key: %w", err)
+	}
+
+	actor := &actorUserID
+	s.recordKeyAudit(ctx, "key.created", actor, newKeyID, entity.AuditResultSuccess, ipAddress, nil)
+
+	return s.RotateKey(ctx, actorUserID, newKeyID, ipAddress)
 }
 
 // RetireKey moves keyID from KeyStateRetiring to KeyStateRetired — but

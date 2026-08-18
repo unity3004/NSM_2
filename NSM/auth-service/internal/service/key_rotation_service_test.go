@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -60,6 +61,27 @@ func (p *fakeRotationProvider) GetKey(_ context.Context, keyID string) ([]byte, 
 	return out, nil
 }
 
+// GenerateKey implements secrets.KeyGenerator — the same "key-vN,
+// smallest unused N" convention DevKeyProvider.GenerateKey uses in the
+// real implementation, so RotateToNewKey's tests exercise realistic
+// sequential IDs rather than an arbitrary test-only naming scheme.
+func (p *fakeRotationProvider) GenerateKey(_ context.Context) (string, error) {
+	max := 0
+	for id := range p.keys {
+		var n int
+		if _, err := fmt.Sscanf(id, "key-v%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	newID := fmt.Sprintf("key-v%d", max+1)
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", err
+	}
+	p.keys[newID] = key
+	return newID, nil
+}
+
 // testKeyRotationEnv mirrors testSecretEnv's shape for KeyRotationService.
 type testKeyRotationEnv struct {
 	svc        *KeyRotationService
@@ -75,7 +97,23 @@ func newTestKeyRotationEnv(t *testing.T) *testKeyRotationEnv {
 	secretRepo := mocks.NewFakeSecretRepository()
 	audit := mocks.NewFakeAuditLogRepository()
 	auditTx := mocks.FakeAuditTx(audit)
-	svc := NewKeyRotationService(km, secretRepo, auditTx)
+	svc := NewKeyRotationService(km, secretRepo, auditTx, provider)
+	return &testKeyRotationEnv{svc: svc, secretRepo: secretRepo, audit: audit, provider: provider}
+}
+
+// newTestKeyRotationEnvNoGenerator mirrors newTestKeyRotationEnv but
+// constructs the service with a nil KeyGenerator — the shape a real
+// KMS-backed deployment would have (see NewKeyRotationService's own doc
+// comment) — for tests asserting RotateToNewKey's ErrKeyGenerationUnsupported
+// behavior specifically.
+func newTestKeyRotationEnvNoGenerator(t *testing.T) *testKeyRotationEnv {
+	t.Helper()
+	provider := newFakeRotationProvider(t, "key-v1")
+	km := secrets.NewKeyManager(provider, secrets.NewInMemoryKeyMetadataStore())
+	secretRepo := mocks.NewFakeSecretRepository()
+	audit := mocks.NewFakeAuditLogRepository()
+	auditTx := mocks.FakeAuditTx(audit)
+	svc := NewKeyRotationService(km, secretRepo, auditTx, nil)
 	return &testKeyRotationEnv{svc: svc, secretRepo: secretRepo, audit: audit, provider: provider}
 }
 
@@ -212,6 +250,172 @@ func TestKeyRotationService_RotateKey_UnavailableKey_RecordsFailureAudit(t *test
 	if !sawFailure {
 		t.Error("RotateKey() failure did not record a key.rotation_started/failure audit entry")
 	}
+}
+
+// --- RotateToNewKey: the single-call rotation engine ---
+
+func TestKeyRotationService_RotateToNewKey_Succeeds(t *testing.T) {
+	env := newTestKeyRotationEnv(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+
+	meta, err := env.svc.RotateToNewKey(ctx, "admin-1", "203.0.113.5")
+	if err != nil {
+		t.Fatalf("RotateToNewKey() error = %v, want nil", err)
+	}
+	if meta.KeyID == "key-v1" {
+		t.Fatal("RotateToNewKey() activated the pre-existing key instead of a genuinely new one")
+	}
+	if meta.State != secrets.KeyStateActive {
+		t.Errorf("RotateToNewKey() new key state = %q, want active", meta.State)
+	}
+
+	current, err := env.svc.CurrentKey(ctx)
+	if err != nil || current.KeyID != meta.KeyID {
+		t.Errorf("CurrentKey() after RotateToNewKey() = %+v (err %v), want %q", current, err, meta.KeyID)
+	}
+
+	// CURRENT KEY -> ... -> OLD KEY = PREVIOUS: key-v1 must have moved to
+	// RETIRING, not vanished.
+	old, err := env.keyManagerMetadata(ctx, "key-v1")
+	if err != nil {
+		t.Fatalf("looking up key-v1 metadata after RotateToNewKey(), error = %v", err)
+	}
+	if old.State != secrets.KeyStateRetiring {
+		t.Errorf("key-v1 state after RotateToNewKey() = %q, want retiring", old.State)
+	}
+}
+
+// The full audit narrative RotateToNewKey should leave behind: the new
+// key didn't exist before this call (key.created), then went through the
+// same activation sequence RotateKey already writes.
+func TestKeyRotationService_RotateToNewKey_RecordsFullAuditTrail(t *testing.T) {
+	env := newTestKeyRotationEnv(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+
+	meta, err := env.svc.RotateToNewKey(ctx, "admin-1", "203.0.113.5")
+	if err != nil {
+		t.Fatalf("RotateToNewKey() error = %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, e := range env.audit.Entries {
+		if e.ResourceID == nil || *e.ResourceID != meta.KeyID {
+			continue
+		}
+		seen[e.Action] = true
+		if e.ActorType != entity.AuditActorUser || e.ActorID == nil || *e.ActorID != "admin-1" {
+			t.Errorf("%q audit entry ActorType/ActorID = %v/%v, want user/admin-1", e.Action, e.ActorType, e.ActorID)
+		}
+	}
+	for _, action := range []string{"key.created", "key.rotation_started", "key.rotation_completed", "key.activated"} {
+		if !seen[action] {
+			t.Errorf("RotateToNewKey() audit trail missing %q for the new key", action)
+		}
+	}
+}
+
+func TestKeyRotationService_RotateToNewKey_RequiresActor(t *testing.T) {
+	env := newTestKeyRotationEnv(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+
+	_, err := env.svc.RotateToNewKey(ctx, "", "203.0.113.5")
+	if !errors.Is(err, entity.ErrForbidden) {
+		t.Errorf("RotateToNewKey() with no actor, error = %v, want entity.ErrForbidden", err)
+	}
+}
+
+// A missing actor must be rejected before a key is even generated — an
+// unauthorized call must never consume a key-vN identifier.
+func TestKeyRotationService_RotateToNewKey_RequiresActor_NeverGeneratesKey(t *testing.T) {
+	env := newTestKeyRotationEnv(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+	before := len(env.provider.keys)
+
+	if _, err := env.svc.RotateToNewKey(ctx, "", "203.0.113.5"); !errors.Is(err, entity.ErrForbidden) {
+		t.Fatalf("RotateToNewKey() with no actor, error = %v, want entity.ErrForbidden", err)
+	}
+	if len(env.provider.keys) != before {
+		t.Errorf("RotateToNewKey() with no actor still registered a new key with the provider (%d keys, want %d)", len(env.provider.keys), before)
+	}
+}
+
+func TestKeyRotationService_RotateToNewKey_NoGeneratorConfigured_Fails(t *testing.T) {
+	env := newTestKeyRotationEnvNoGenerator(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+
+	_, err := env.svc.RotateToNewKey(ctx, "admin-1", "203.0.113.5")
+	if !errors.Is(err, ErrKeyGenerationUnsupported) {
+		t.Errorf("RotateToNewKey() with no KeyGenerator configured, error = %v, want ErrKeyGenerationUnsupported", err)
+	}
+
+	// Unaffected: the pre-existing active key must remain active.
+	current, err := env.svc.CurrentKey(ctx)
+	if err != nil || current.KeyID != "key-v1" {
+		t.Errorf("CurrentKey() after a refused RotateToNewKey(), error = %v, meta = %+v, want key-v1 still active", err, current)
+	}
+}
+
+// Repeated calls must each mint a distinct, sequential key — proving the
+// engine can be used for genuine multi-generation rotation, not just a
+// single one-shot key-v1 -> key-v2 transition.
+func TestKeyRotationService_RotateToNewKey_SequentialAcrossMultipleCalls(t *testing.T) {
+	env := newTestKeyRotationEnv(t)
+	ctx := t.Context()
+	if _, err := env.svc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("EnsureBootstrapped() error = %v", err)
+	}
+
+	first, err := env.svc.RotateToNewKey(ctx, "admin-1", "")
+	if err != nil {
+		t.Fatalf("first RotateToNewKey() error = %v", err)
+	}
+	second, err := env.svc.RotateToNewKey(ctx, "admin-1", "")
+	if err != nil {
+		t.Fatalf("second RotateToNewKey() error = %v", err)
+	}
+	if first.KeyID == second.KeyID {
+		t.Fatalf("two RotateToNewKey() calls produced the same key ID %q", first.KeyID)
+	}
+
+	all, err := env.svc.ListKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListKeys() error = %v", err)
+	}
+	if len(all) != 3 { // key-v1 (bootstrap) + two generated keys
+		t.Fatalf("ListKeys() returned %d keys, want 3 (rotation must never remove a key)", len(all))
+	}
+}
+
+// keyManagerMetadata is a small test helper — KeyRotationService exposes
+// CurrentKey/ListKeys but not an arbitrary-key-by-ID lookup, so this
+// reaches ListKeys and filters, exactly what an operator inspecting
+// rotation results would do with the same public surface.
+func (env *testKeyRotationEnv) keyManagerMetadata(ctx context.Context, keyID string) (secrets.KeyMetadata, error) {
+	all, err := env.svc.ListKeys(ctx)
+	if err != nil {
+		return secrets.KeyMetadata{}, err
+	}
+	for _, m := range all {
+		if m.KeyID == keyID {
+			return m, nil
+		}
+	}
+	return secrets.KeyMetadata{}, secrets.ErrKeyNotFound
 }
 
 // --- RetireKey: the ROTATION SAFETY reference check ---

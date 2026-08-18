@@ -487,7 +487,12 @@ func main() {
 			AuditTx:              loginAuditTx,
 		})
 
-		keyRotationSvc = service.NewKeyRotationService(keyManager, secretRepo, loginAuditTx)
+		// keyProvider (the concrete *secrets.DevKeyProvider constructed
+		// above) also satisfies secrets.KeyGenerator, so RotateToNewKey
+		// works out of the box in this deployment — a real KMS-backed
+		// KeyProvider would not, and this argument would be nil there
+		// (see KeyRotationService.RotateToNewKey's own doc comment).
+		keyRotationSvc = service.NewKeyRotationService(keyManager, secretRepo, loginAuditTx, keyProvider)
 		// Explicit at startup, not left to happen lazily on the first
 		// /v1/secrets request — see KeyRotationService.EnsureBootstrapped's
 		// own doc comment for why: a misconfigured or unreachable key
